@@ -48,20 +48,17 @@ def execute_collective_attack(attack_id):
     if not atk_res.data: return 
     attack = atk_res.data[0]
     
-    # Удаляем атаку из базы (чтобы таймер не сработал дважды)
     supabase.table('quest_collective_attacks').delete().eq('id', attack_id).execute()
     
-    # Собираем голоса тех, кто успел нажать
     votes = supabase.table('quest_collective_votes').select('user_id').eq('attack_id', attack_id).execute()
     if not votes.data: 
         supabase.table('quest_collective_votes').delete().eq('attack_id', attack_id).execute()
-        return # Никто не нажал, атака отменяется
+        return
         
     voter_ids = [v['user_id'] for v in votes.data]
     attackers = supabase.table('quest_players').select('strength').in_('user_id', voter_ids).execute()
     total_damage = sum(a['strength'] for a in attackers.data)
     
-    # Наносим урон
     defender = supabase.table('quest_players').select('*').eq('user_id', attack['target_id']).execute().data[0]
     new_defense = max(0, defender['defense'] - total_damage)
     new_status = 'wounded' if new_defense <= 0 else defender['status']
@@ -69,16 +66,13 @@ def execute_collective_attack(attack_id):
     supabase.table('quest_players').update({'defense': new_defense, 'status': new_status}).eq('user_id', attack['target_id']).execute()
     supabase.table('quest_attacks').insert({'attacker_id': voter_ids[0], 'defender_id': attack['target_id'], 'damage': total_damage}).execute()
     
-    # Уведомляем тех, кто успел нажать
     for vid in voter_ids:
         u_data = supabase.table('users').select('telegram_id').eq('id', vid).execute()
         if u_data.data and u_data.data[0]['telegram_id']:
             try: bot.send_message(u_data.data[0]['telegram_id'], f"🔥 Время вышло! Коллективная атака завершена.\nСуммарный урон: {total_damage}.\nЗащита врага: {new_defense}.")
             except: pass
             
-    # Чистим голоса
     supabase.table('quest_collective_votes').delete().eq('attack_id', attack_id).execute()
-
 
 # --- КОМАНДЫ ---
 @bot.message_handler(commands=['start'])
@@ -107,48 +101,8 @@ def attack_menu(message):
     for p in all_players.data: markup.add(types.InlineKeyboardButton(f"Напасть на {p['users']['name']}", callback_data=f"atk_{p['user_id']}"))
     if all_players.data: bot.send_message(message.chat.id, "Выбери цель:", reply_markup=markup)
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('inv_'))
-def send_invite(call):
-    try:
-        parts = call.data.split('_')
-        alliance_id = parts[1]
-        idx = int(parts[2])
-        
-        user_id, _ = get_or_create_player(call.from_user)
-        # Важно: теперь мы также запрашиваем telegram_id игрока
-        all_players = supabase.table('quest_players').select('user_id, users(name, telegram_id)').neq('user_id', user_id).execute()
-        
-        if idx >= len(all_players.data):
-            return bot.answer_callback_query(call.id, "Игрок не найден.", show_alert=True)
-            
-        target_player = all_players.data[idx]
-        target_user_id = target_player['user_id']
-        target_tg_id = target_player['users']['telegram_id']
-        
-        existing = supabase.table('quest_alliance_members').select('*').eq('alliance_id', alliance_id).eq('user_id', target_user_id).execute()
-        if existing.data: 
-            return bot.answer_callback_query(call.id, "Уже в союзе или приглашен.", show_alert=True)
-            
-        supabase.table('quest_alliance_members').insert({'alliance_id': alliance_id, 'user_id': target_user_id, 'status': 'pending'}).execute()
-        
-        # --- ОТПРАВЛЯЕМ СООБЩЕНИЕ ИГРОКУ ---
-        if target_tg_id:
-            # Узнаем название союза
-            alliance_name = supabase.table('quest_alliances').select('name').eq('id', alliance_id).execute().data[0]['name']
-            
-            markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton("✅ Принять", callback_data=f"join_alliance_{alliance_id}"))
-            markup.add(types.InlineKeyboardButton("❌ Отклонить", callback_data=f"decline_alliance_{alliance_id}"))
-            
-            try:
-                bot.send_message(target_tg_id, f"🤝 Вас приглашают в союз *{alliance_name}*!", parse_mode='Markdown', reply_markup=markup)
-            except Exception as e:
-                print(f"Не удалось отправить сообщение игроку: {e}")
-                
-        bot.answer_callback_query(call.id, "Приглашение отправлено!")
-        bot.send_message(call.message.chat.id, "Приглашение успешно отправлено игроку.")
-    except Exception as e:
-        bot.answer_callback_query(call.id, f"Ошибка: {e}", show_alert=True)
+@bot.callback_query_handler(func=lambda call: call.data.startswith('atk_'))
+def perform_attack(call):
     attacker_id, attacker = get_or_create_player(call.from_user)
     defender_id = call.data.split('_')[1]
     defender = supabase.table('quest_players').select('*').eq('user_id', defender_id).execute().data[0]
@@ -217,7 +171,6 @@ def alliance_invite_menu(call):
         
         markup = types.InlineKeyboardMarkup()
         for idx, p in enumerate(all_players.data):
-            # Передаем ИНДЕКС игрока вместо длинного UUID
             markup.add(types.InlineKeyboardButton(f"Пригласить {p['users']['name']}", callback_data=f"inv_{alliance_id}_{idx}"))
             
         bot.edit_message_text("Кого пригласить?", call.message.chat.id, call.message.message_id, reply_markup=markup)
@@ -233,18 +186,36 @@ def send_invite(call):
         idx = int(parts[2])
         
         user_id, _ = get_or_create_player(call.from_user)
-        all_players = supabase.table('quest_players').select('user_id').neq('user_id', user_id).execute()
+        all_players = supabase.table('quest_players').select('user_id, users(name, telegram_id)').neq('user_id', user_id).execute()
         
         if idx >= len(all_players.data):
             return bot.answer_callback_query(call.id, "Игрок не найден.", show_alert=True)
             
-        target_user_id = all_players.data[idx]['user_id']
+        target_player = all_players.data[idx]
+        target_user_id = target_player['user_id']
+        target_tg_id = target_player['users']['telegram_id']
         
         existing = supabase.table('quest_alliance_members').select('*').eq('alliance_id', alliance_id).eq('user_id', target_user_id).execute()
-        if existing.data: 
-            return bot.answer_callback_query(call.id, "Уже в союзе или приглашен.", show_alert=True)
+        
+        if existing.data:
+            if existing.data[0]['status'] == 'accepted':
+                return bot.answer_callback_query(call.id, "Игрок уже состоит в союзе!", show_alert=True)
+            # Если статус pending, идем дальше и отправляем сообщение заново
+        else:
+            supabase.table('quest_alliance_members').insert({'alliance_id': alliance_id, 'user_id': target_user_id, 'status': 'pending'}).execute()
+        
+        if target_tg_id:
+            alliance_name = supabase.table('quest_alliances').select('name').eq('id', alliance_id).execute().data[0]['name']
             
-        supabase.table('quest_alliance_members').insert({'alliance_id': alliance_id, 'user_id': target_user_id, 'status': 'pending'}).execute()
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton("✅ Принять", callback_data=f"join_alliance_{alliance_id}"))
+            markup.add(types.InlineKeyboardButton("❌ Отклонить", callback_data=f"decline_alliance_{alliance_id}"))
+            
+            try:
+                bot.send_message(target_tg_id, f"🤝 Вас приглашают в союз *{alliance_name}*!", parse_mode='Markdown', reply_markup=markup)
+            except Exception as e:
+                print(f"Не удалось отправить сообщение: {e}")
+                
         bot.answer_callback_query(call.id, "Приглашение отправлено!")
         bot.send_message(call.message.chat.id, "Приглашение успешно отправлено игроку.")
     except Exception as e:
@@ -283,7 +254,6 @@ def col_atk_init(call):
     atk_res = supabase.table('quest_collective_attacks').insert({'alliance_id': alliance_id, 'target_id': target_id, 'initiator_id': user_id}).execute()
     attack_id = atk_res.data[0]['id']
     
-    # Запускаем таймер на 60 секунд
     timer = threading.Timer(60.0, execute_collective_attack, args=[attack_id])
     timer.start()
     
