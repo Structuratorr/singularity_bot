@@ -1,4 +1,6 @@
 import telebot
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import threading
 from telebot import types
 from supabase import create_client, Client
 import uuid
@@ -269,4 +271,17 @@ def mission(message):
 
 # --- ЗАПУСК ---
 print("Бот запущен...")
+# --- ВЕБ-СЕРВЕР ДЛЯ RENDER ---
+class DummyHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is alive")
+
+def run_server():
+    server = HTTPServer(('0.0.0.0', 8080), DummyHandler)
+    server.serve_forever()
+
+# Запускаем сервер в отдельном потоке, чтобы он не мешал боту
+threading.Thread(target=run_server, daemon=True).start()
 bot.infinity_polling()
