@@ -107,8 +107,48 @@ def attack_menu(message):
     for p in all_players.data: markup.add(types.InlineKeyboardButton(f"Напасть на {p['users']['name']}", callback_data=f"atk_{p['user_id']}"))
     if all_players.data: bot.send_message(message.chat.id, "Выбери цель:", reply_markup=markup)
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('atk_'))
-def perform_attack(call):
+@bot.callback_query_handler(func=lambda call: call.data.startswith('inv_'))
+def send_invite(call):
+    try:
+        parts = call.data.split('_')
+        alliance_id = parts[1]
+        idx = int(parts[2])
+        
+        user_id, _ = get_or_create_player(call.from_user)
+        # Важно: теперь мы также запрашиваем telegram_id игрока
+        all_players = supabase.table('quest_players').select('user_id, users(name, telegram_id)').neq('user_id', user_id).execute()
+        
+        if idx >= len(all_players.data):
+            return bot.answer_callback_query(call.id, "Игрок не найден.", show_alert=True)
+            
+        target_player = all_players.data[idx]
+        target_user_id = target_player['user_id']
+        target_tg_id = target_player['users']['telegram_id']
+        
+        existing = supabase.table('quest_alliance_members').select('*').eq('alliance_id', alliance_id).eq('user_id', target_user_id).execute()
+        if existing.data: 
+            return bot.answer_callback_query(call.id, "Уже в союзе или приглашен.", show_alert=True)
+            
+        supabase.table('quest_alliance_members').insert({'alliance_id': alliance_id, 'user_id': target_user_id, 'status': 'pending'}).execute()
+        
+        # --- ОТПРАВЛЯЕМ СООБЩЕНИЕ ИГРОКУ ---
+        if target_tg_id:
+            # Узнаем название союза
+            alliance_name = supabase.table('quest_alliances').select('name').eq('id', alliance_id).execute().data[0]['name']
+            
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton("✅ Принять", callback_data=f"join_alliance_{alliance_id}"))
+            markup.add(types.InlineKeyboardButton("❌ Отклонить", callback_data=f"decline_alliance_{alliance_id}"))
+            
+            try:
+                bot.send_message(target_tg_id, f"🤝 Вас приглашают в союз *{alliance_name}*!", parse_mode='Markdown', reply_markup=markup)
+            except Exception as e:
+                print(f"Не удалось отправить сообщение игроку: {e}")
+                
+        bot.answer_callback_query(call.id, "Приглашение отправлено!")
+        bot.send_message(call.message.chat.id, "Приглашение успешно отправлено игроку.")
+    except Exception as e:
+        bot.answer_callback_query(call.id, f"Ошибка: {e}", show_alert=True)
     attacker_id, attacker = get_or_create_player(call.from_user)
     defender_id = call.data.split('_')[1]
     defender = supabase.table('quest_players').select('*').eq('user_id', defender_id).execute().data[0]
