@@ -291,7 +291,7 @@ def accept_invite(call):
     fac_name = supabase.table('quest_alliances').select('name').eq('id', faction_id).execute().data[0]['name']
     supabase.table('quest_players').update({'faction': fac_name}).eq('user_id', user_id).execute()
     bot.answer_callback_query(call.id, "Ты в фракции!")
-    bot.edit_message_text(f"Ты вступил во фракцию *{fac_name}*!", parse_mode='Markdown', call.message.chat.id, call.message.message_id)
+    bot.edit_message_text(f"Ты вступил во фракцию *{fac_name}*!", call.message.chat.id, call.message.message_id, parse_mode='Markdown')
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('decline_fac_'))
 def decline_invite(call):
