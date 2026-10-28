@@ -155,7 +155,6 @@ def faction_menu(message):
     
     markup = types.InlineKeyboardMarkup()
     text = "🛡 *Твои фракции:*\n\n"
-    
     seen_ids = set()
     if res.data:
         for item in res.data:
@@ -169,8 +168,6 @@ def faction_menu(message):
             markup.add(types.InlineKeyboardButton(f"⚔️ Атака: {alliance['name']}", callback_data=f"fac_atk_{alliance['id']}"))
             if is_leader:
                 markup.add(types.InlineKeyboardButton(f"⚙️ Управление: {alliance['name']}", callback_data=f"fac_manage_{alliance['id']}"))
-            
-            # ВЫХОД ДОСТУПЕН ВСЕМ (И ЛИДЕРАМ ТОЖЕ)
             markup.add(types.InlineKeyboardButton(f"🚪 Выйти из {alliance['name']}", callback_data=f"fac_leave_{alliance['id']}"))
     else:
         text = "Ты пока не состоишь во фракциях."
@@ -293,73 +290,115 @@ def decline_invite(call):
     supabase.table('quest_alliance_members').delete().eq('alliance_id', faction_id).eq('user_id', user_id).execute()
     bot.edit_message_text("Ты отклонил приглашение.", call.message.chat.id, call.message.message_id)
 
-# --- КОЛЛЕКТИВНАЯ АТАКА ---
+# --- КОЛЛЕКТИВНАЯ АТАКА (ОТЛАДКА) ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith('fac_atk_'))
 def col_atk_menu(call):
-    faction_id = call.data.split('_')[2]
-    markup = types.InlineKeyboardMarkup()
-    factions = supabase.table('quest_alliances').select('id, name').neq('id', faction_id).execute()
-    for a in factions.data: markup.add(types.InlineKeyboardButton(f"🏰 {a['name']}", callback_data=f"colatk_ally_{faction_id}_{a['id']}"))
-    markup.add(types.InlineKeyboardButton("👤 Одиночный игрок", callback_data=f"colatk_solo_{faction_id}"))
-    bot.edit_message_text("Выбери цель для атаки фракции:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+    try:
+        faction_id = call.data.split('_')[2]
+        markup = types.InlineKeyboardMarkup()
+        factions = supabase.table('quest_alliances').select('id, name').neq('id', faction_id).execute()
+        for a in factions.data: markup.add(types.InlineKeyboardButton(f"🏰 {a['name']}", callback_data=f"colatk_ally_{faction_id}_{a['id']}"))
+        markup.add(types.InlineKeyboardButton("👤 Одиночный игрок", callback_data=f"colatk_solo_{faction_id}"))
+        bot.edit_message_text("Выбери цель для атаки фракции:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+        bot.answer_callback_query(call.id)
+    except Exception as e:
+        bot.send_message(call.message.chat.id, f"Ошибка меню атаки: {e}")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('colatk_ally_'))
 def col_atk_init_ally(call):
-    parts = call.data.split('_')
-    atk_fac, target_fac = parts[2], parts[3]
-    user_id, _ = get_or_create_player(call.from_user)
-    target_name = supabase.table('quest_alliances').select('name').eq('id', target_fac).execute().data[0]['name']
-    
-    atk_id = supabase.table('quest_collective_attacks').insert({'alliance_id': atk_fac, 'target_id': target_fac, 'initiator_id': user_id}).execute().data[0]['id']
-    threading.Timer(60.0, execute_collective_attack, args=[atk_id, True]).start()
-    
-    members = supabase.table('quest_alliance_members').select('user_id, users(telegram_id)').eq('alliance_id', atk_fac).eq('status', 'accepted').execute()
-    sent_count = 0
-    for m in members.data:
-        if m['users'] and m['users'].get('telegram_id'):
-            try:
-                markup = types.InlineKeyboardMarkup()
-                markup.add(types.InlineKeyboardButton("Подтвердить удар", callback_data=f"vote_{atk_id}"))
-                bot.send_message(m['users']['telegram_id'], f"⚔️ Атака на фракцию *{target_name}*! Жми!", parse_mode='Markdown', reply_markup=markup)
-                sent_count += 1
-            except Exception as e: print(f"Ошибка отправки: {e}")
-    
-    bot.answer_callback_query(call.id, f"Атака начата! Уведомлений отправлено: {sent_count}")
-    bot.edit_message_text(f"Ожидаем удары по {target_name} (60 сек)...", call.message.chat.id, call.message.message_id)
+    try:
+        parts = call.data.split('_')
+        atk_fac, target_fac = parts[2], parts[3]
+        user_id, _ = get_or_create_player(call.from_user)
+        target_name = supabase.table('quest_alliances').select('name').eq('id', target_fac).execute().data[0]['name']
+        
+        atk_id = supabase.table('quest_collective_attacks').insert({'alliance_id': atk_fac, 'target_id': target_fac, 'initiator_id': user_id}).execute().data[0]['id']
+        
+        # Запускаем таймер
+        threading.Timer(60.0, execute_collective_attack, args=[atk_id, True]).start()
+        
+        # ПОЛУЧАЕМ УЧАСТНИКОВ
+        members = supabase.table('quest_alliance_members').select('user_id').eq('alliance_id', atk_fac).eq('status', 'accepted').execute()
+        member_ids = [m['user_id'] for m in members.data]
+        
+        # Если ты один в фракции - атака срабатывает сразу
+        if len(member_ids) <= 1:
+            supabase.table('quest_collective_votes').insert({'attack_id': atk_id, 'user_id': user_id}).execute()
+            execute_collective_attack(atk_id, True)
+            bot.answer_callback_query(call.id, "Ты один во фракции, атака совершена!")
+            bot.edit_message_text(f"Ты в одиночку атаковал {target_name}!", call.message.chat.id, call.message.message_id)
+            return
+
+        # Иначе шлем кнопки всем
+        users_data = supabase.table('users').select('id, telegram_id').in_('id', member_ids).execute()
+        sent_count = 0
+        for u in users_data.data:
+            tg_id = u.get('telegram_id')
+            if tg_id:
+                try:
+                    markup = types.InlineKeyboardMarkup()
+                    markup.add(types.InlineKeyboardButton("Подтвердить удар", callback_data=f"vote_{atk_id}"))
+                    bot.send_message(tg_id, f"⚔️ Атака на фракцию *{target_name}*! Жми!", parse_mode='Markdown', reply_markup=markup)
+                    sent_count += 1
+                except Exception as e:
+                    print(f"Не смог отправить {tg_id}: {e}")
+        
+        bot.answer_callback_query(call.id, f"Атака начата! Уведомлений: {sent_count}")
+        bot.edit_message_text(f"Ожидаем удары по {target_name} (60 сек)...", call.message.chat.id, call.message.message_id)
+    except Exception as e:
+        bot.send_message(call.message.chat.id, f"Ошибка при инициации атаки: {e}")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('colatk_solo_'))
 def col_atk_init_solo(call):
-    faction_id = call.data.split('_')[2]
-    players = supabase.table('quest_players').select('user_id, users(name)').eq('status', 'alive').execute()
-    markup = types.InlineKeyboardMarkup()
-    for idx, p in enumerate(players.data): markup.add(types.InlineKeyboardButton(f"{p['users']['name']}", callback_data=f"colatk_target_{faction_id}_{idx}"))
-    bot.edit_message_text("Выбери цель:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+    try:
+        faction_id = call.data.split('_')[2]
+        players = supabase.table('quest_players').select('user_id, users(name)').eq('status', 'alive').execute()
+        markup = types.InlineKeyboardMarkup()
+        for idx, p in enumerate(players.data): markup.add(types.InlineKeyboardButton(f"{p['users']['name']}", callback_data=f"colatk_target_{faction_id}_{idx}"))
+        bot.edit_message_text("Выбери цель:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+        bot.answer_callback_query(call.id)
+    except Exception as e:
+        bot.send_message(call.message.chat.id, f"Ошибка: {e}")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('colatk_target_'))
 def col_atk_init_target(call):
-    parts = call.data.split('_')
-    faction_id, idx = parts[2], int(parts[3])
-    user_id, _ = get_or_create_player(call.from_user)
-    players = supabase.table('quest_players').select('user_id').eq('status', 'alive').execute()
-    if idx >= len(players.data): return
-    target_id = players.data[idx]['user_id']
-    
-    atk_id = supabase.table('quest_collective_attacks').insert({'alliance_id': faction_id, 'target_id': target_id, 'initiator_id': user_id}).execute().data[0]['id']
-    threading.Timer(60.0, execute_collective_attack, args=[atk_id, False]).start()
-    
-    members = supabase.table('quest_alliance_members').select('user_id, users(telegram_id)').eq('alliance_id', faction_id).eq('status', 'accepted').execute()
-    sent_count = 0
-    for m in members.data:
-        if m['users'] and m['users'].get('telegram_id'):
-            try:
-                markup = types.InlineKeyboardMarkup()
-                markup.add(types.InlineKeyboardButton("Подтвердить удар", callback_data=f"vote_{atk_id}"))
-                bot.send_message(m['users']['telegram_id'], f"⚔️ Твоя фракция объявила атаку! 1 минута на подтверждение.", reply_markup=markup)
-                sent_count += 1
-            except Exception as e: print(f"Ошибка отправки: {e}")
-            
-    bot.answer_callback_query(call.id, f"Атака начата! Уведомлений: {sent_count}")
-    bot.edit_message_text("Ожидаем удары (60 сек)...", call.message.chat.id, call.message.message_id)
+    try:
+        parts = call.data.split('_')
+        faction_id, idx = parts[2], int(parts[3])
+        user_id, _ = get_or_create_player(call.from_user)
+        players = supabase.table('quest_players').select('user_id').eq('status', 'alive').execute()
+        if idx >= len(players.data): return
+        target_id = players.data[idx]['user_id']
+        
+        atk_id = supabase.table('quest_collective_attacks').insert({'alliance_id': faction_id, 'target_id': target_id, 'initiator_id': user_id}).execute().data[0]['id']
+        threading.Timer(60.0, execute_collective_attack, args=[atk_id, False]).start()
+        
+        members = supabase.table('quest_alliance_members').select('user_id').eq('alliance_id', faction_id).eq('status', 'accepted').execute()
+        member_ids = [m['user_id'] for m in members.data]
+        
+        if len(member_ids) <= 1:
+            supabase.table('quest_collective_votes').insert({'attack_id': atk_id, 'user_id': user_id}).execute()
+            execute_collective_attack(atk_id, False)
+            bot.answer_callback_query(call.id, "Ты один во фракции, атака совершена!")
+            bot.edit_message_text("Ты в одиночку напал на игрока!", call.message.chat.id, call.message.message_id)
+            return
+
+        users_data = supabase.table('users').select('id, telegram_id').in_('id', member_ids).execute()
+        sent_count = 0
+        for u in users_data.data:
+            tg_id = u.get('telegram_id')
+            if tg_id:
+                try:
+                    markup = types.InlineKeyboardMarkup()
+                    markup.add(types.InlineKeyboardButton("Подтвердить удар", callback_data=f"vote_{atk_id}"))
+                    bot.send_message(tg_id, f"⚔️ Твоя фракция объявила атаку! 1 минута на подтверждение.", reply_markup=markup)
+                    sent_count += 1
+                except Exception as e: print(f"Ошибка отправки: {e}")
+                
+        bot.answer_callback_query(call.id, f"Атака начата! Уведомлений: {sent_count}")
+        bot.edit_message_text("Ожидаем удары (60 сек)...", call.message.chat.id, call.message.message_id)
+    except Exception as e:
+        bot.send_message(call.message.chat.id, f"Ошибка: {e}")
 
 def execute_collective_attack(attack_id, is_alliance_target):
     try:
@@ -382,7 +421,6 @@ def execute_collective_attack(attack_id, is_alliance_target):
         if is_alliance_target:
             def_members = supabase.table('quest_alliance_members').select('user_id').eq('alliance_id', attack['target_id']).execute()
             if not def_members.data: return
-            
             defenders = supabase.table('quest_players').select('user_id, defense, hp, max_hp').in_('user_id', [m['user_id'] for m in def_members.data]).execute()
             if not defenders.data: return
             
@@ -408,30 +446,33 @@ def execute_collective_attack(attack_id, is_alliance_target):
             
         supabase.table('quest_collective_votes').delete().eq('attack_id', attack_id).execute()
     except Exception as e:
-        print(f"Ошибка выполнения коллективной атаки: {e}")
+        print(f"Критическая ошибка при выполнении атаки: {e}")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('vote_'))
 def col_atk_vote(call):
-    attack_id = call.data.split('_')[1]
-    user_id, _ = get_or_create_player(call.from_user)
-    
-    try: supabase.table('quest_collective_votes').insert({'attack_id': attack_id, 'user_id': user_id}).execute()
-    except: return bot.answer_callback_query(call.id, "Уже подтвердил.", show_alert=True)
+    try:
+        attack_id = call.data.split('_')[1]
+        user_id, _ = get_or_create_player(call.from_user)
+        
+        try: supabase.table('quest_collective_votes').insert({'attack_id': attack_id, 'user_id': user_id}).execute()
+        except: return bot.answer_callback_query(call.id, "Уже подтвердил.", show_alert=True)
 
-    atk = supabase.table('quest_collective_attacks').select('*').eq('id', attack_id).execute().data
-    if not atk: return bot.answer_callback_query(call.id, "Атака уже завершена!", show_alert=True)
-    attack = atk[0]
-    
-    members = supabase.table('quest_alliance_members').select('user_id').eq('alliance_id', attack['alliance_id']).eq('status', 'accepted').execute()
-    votes = supabase.table('quest_collective_votes').select('user_id').eq('attack_id', attack_id).execute()
+        atk = supabase.table('quest_collective_attacks').select('*').eq('id', attack_id).execute().data
+        if not atk: return bot.answer_callback_query(call.id, "Атака завершена!", show_alert=True)
+        attack = atk[0]
+        
+        members = supabase.table('quest_alliance_members').select('user_id').eq('alliance_id', attack['alliance_id']).eq('status', 'accepted').execute()
+        votes = supabase.table('quest_collective_votes').select('user_id').eq('attack_id', attack_id).execute()
 
-    if len(votes.data) >= len(members.data):
-        is_ally = supabase.table('quest_alliances').select('id').eq('id', attack['target_id']).execute().data
-        execute_collective_attack(attack_id, bool(is_ally))
-        bot.edit_message_text("Все собрались! Удар нанесен.", call.message.chat.id, call.message.message_id)
-    else:
-        bot.answer_callback_query(call.id, f"Голос учтен! ({len(votes.data)}/{len(members.data)})")
-        bot.edit_message_text(f"Ждем остальных... ({len(votes.data)}/{len(members.data)})", call.message.chat.id, call.message.message_id)
+        if len(votes.data) >= len(members.data):
+            is_ally = supabase.table('quest_alliances').select('id').eq('id', attack['target_id']).execute().data
+            execute_collective_attack(attack_id, bool(is_ally))
+            bot.edit_message_text("Все собрались! Удар нанесен.", call.message.chat.id, call.message.message_id)
+        else:
+            bot.answer_callback_query(call.id, f"Голос учтен! ({len(votes.data)}/{len(members.data)})")
+            bot.edit_message_text(f"Ждем остальных... ({len(votes.data)}/{len(members.data)})", call.message.chat.id, call.message.message_id)
+    except Exception as e:
+        bot.send_message(call.message.chat.id, f"Ошибка при голосовании: {e}")
 
 # --- ПАНЕЛЬ МАСТЕРА ---
 @bot.message_handler(func=lambda message: message.text == '👑 Мастер' and message.from_user.id == MASTER_TG_ID)
@@ -560,7 +601,7 @@ def inventory(message):
         it = item['quest_items']
         eq = "✅" if item['is_equipped'] else ""
         text += f"▪️ {it['name']} {eq}\n"
-        if not item['is_equipped']: markup.add(types.InlineKeyboardButton(f"Надеть {it['name']}", callback_data=f"equip_{item['id']}"))
+        if not it['is_equipped']: markup.add(types.InlineKeyboardButton(f"Надеть {it['name']}", callback_data=f"equip_{item['id']}"))
     bot.send_message(message.chat.id, text, parse_mode='Markdown', reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('equip_'))
