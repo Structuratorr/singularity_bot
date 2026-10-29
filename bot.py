@@ -195,6 +195,11 @@ def create_faction(call):
     bot.register_next_step_handler(call.message, save_faction)
 
 def save_faction(message):
+    # Защита от случайного нажатия кнопок меню
+    forbidden = ['👤 Профиль', '⚔️ Напасть', '🎒 Инвентарь', '📜 Миссия', '🛡 Фракции', '🌍 Мир', '👑 Мастер', '➕ Создать фракцию']
+    if message.text in forbidden:
+        return bot.send_message(message.chat.id, "Создание фракции отменено (ты нажал на кнопку меню).", reply_markup=get_main_keyboard(message.from_user.id))
+
     user_id, _ = get_or_create_player(message.from_user)
     a_res = supabase.table('quest_alliances').insert({'name': message.text, 'leader_id': user_id}).execute()
     supabase.table('quest_alliance_members').insert({'alliance_id': a_res.data[0]['id'], 'user_id': user_id, 'status': 'accepted'}).execute()
