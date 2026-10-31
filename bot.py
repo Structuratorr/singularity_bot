@@ -35,7 +35,7 @@ def get_or_create_player(tg_user):
     
     q_res = supabase.table('quest_players').select('*').eq('user_id', user_id).execute()
     if not q_res.data:
-        supabase.table('quest_players').insert({'user_id': user_id, 'hp': 10, 'max_hp': 10, 'defense': 2}).execute()
+        supabase.table('quest_players').insert({'user_id': user_id, 'hp': 10, 'max_hp': 10, 'defense': 2, 'strength': 2}).execute()
         q_res = supabase.table('quest_players').select('*').eq('user_id', user_id).execute()
     return user_id, q_res.data[0]
 
@@ -46,10 +46,10 @@ def get_player_factions(user_id):
 
 def get_main_keyboard(tg_id):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add(types.KeyboardButton('👤 Профиль'), types.KeyboardButton('⚔️ Напасть'))
+    # Кнопка "Профиль" убрана
+    markup.add(types.KeyboardButton('⚔️ Напасть'), types.KeyboardButton('🌍 Мир'))
     markup.add(types.KeyboardButton('🎒 Инвентарь'), types.KeyboardButton('📜 Миссии'))
-    markup.add(types.KeyboardButton('🛡 Фракции'), types.KeyboardButton('🌍 Мир'))
-    markup.add(types.KeyboardButton('💸 Перевести деньги'))
+    markup.add(types.KeyboardButton('🛡 Фракции'), types.KeyboardButton('💸 Перевести деньги'))
     if tg_id == MASTER_TG_ID:
         markup.add(types.KeyboardButton('👑 Мастер'))
     return markup
@@ -79,37 +79,6 @@ def start(message):
     get_or_create_player(message.from_user)
     bot.send_message(message.chat.id, f"Добро пожаловать в квест, {message.from_user.first_name}!", reply_markup=get_main_keyboard(message.from_user.id))
 
-@bot.message_handler(func=lambda message: message.text == '👤 Профиль')
-def profile(message):
-    user_id, player = get_or_create_player(message.from_user)
-    att_bonus, pierce = get_player_stats(user_id)
-    factions = get_player_factions(user_id)
-    
-    status_emoji = '🩸' if player['hp'] <= 0 else ('🟡' if player['hp'] < 5 else '🟢')
-    hp_bar = f"❤️ {player['hp']}/{player['max_hp']}"
-    
-    cd_text = ""
-    if player.get('last_attack_time'):
-        try:
-            last_atk = datetime.fromisoformat(player['last_attack_time'].replace('Z', '+00:00'))
-            now = datetime.now(timezone.utc)
-            diff = timedelta(minutes=15) - (now - last_atk)
-            if diff.total_seconds() > 0:
-                mins = int(diff.total_seconds() // 60) + 1
-                cd_text = f"\n⏳ Отдых после атаки: {mins} мин."
-        except: pass
-
-    text = (f"👤 *{message.from_user.first_name}*\nФракции: {factions}\nСтатус: {status_emoji} {player['status']}\n\n"
-            f"❤️ Здоровье: {hp_bar}\n🛡 Броня: {player['defense']}\n"
-            f"⚔️ Сила: {att_bonus} (Пробой брони: {pierce})\n"
-            f"💰 Талеры: {format_money(player['star_thalers'])}{cd_text}\n\n📜 История: {player['history'] or 'Пока пусто...'}")
-            
-    if player.get('avatar_id'):
-        try: bot.send_photo(message.chat.id, player['avatar_id'], caption=text, parse_mode='Markdown')
-        except: bot.send_message(message.chat.id, text, parse_mode='Markdown')
-    else:
-        bot.send_message(message.chat.id, text, parse_mode='Markdown')
-
 @bot.message_handler(func=lambda message: message.text == '🌍 Мир')
 def world_menu(message):
     user_id, _ = get_or_create_player(message.from_user)
@@ -118,20 +87,30 @@ def world_menu(message):
     markup = types.InlineKeyboardMarkup()
     for p in players.data:
         status_icon = '🩸' if p['hp'] <= 0 else ('🟡' if p['hp'] < 5 else '🟢')
-        markup.add(types.InlineKeyboardButton(f"{status_icon} {p['users']['name']}", callback_data=f"view_{p['user_id']}"))
+        is_me = (p['user_id'] == user_id)
+        me_tag = " (Вы)" if is_me else ""
+        markup.add(types.InlineKeyboardButton(f"{status_icon} {p['users']['name']}{me_tag}", callback_data=f"view_{p['user_id']}"))
     bot.send_message(message.chat.id, "🌍 *Жители мира:*", parse_mode='Markdown', reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('view_'))
 def view_profile(call):
     bot.answer_callback_query(call.id)
     target_id = call.data.split('_')[1]
+    current_id, _ = get_or_create_player(call.from_user)
+    
     player = supabase.table('quest_players').select('*, users(name)').eq('user_id', target_id).execute().data[0]
     name = player['users']['name']
     factions = get_player_factions(target_id)
+    att_bonus, pierce = get_player_stats(target_id)
     
     status_emoji = '🩸' if player['hp'] <= 0 else ('🟡' if player['hp'] < 5 else '🟢')
+    
+    # Скрываем талеры, если смотрим чужой профиль
+    money_text = f"\n💰 Талеры: {format_money(player['star_thalers'])}" if target_id == current_id else ""
+    
     text = (f"👤 *{name}*\nФракции: {factions}\nСтатус: {status_emoji} {player['status']}\n"
             f"❤️ HP: {player['hp']}/{player['max_hp']}\n🛡 Броня: {player['defense']}\n"
+            f"⚔️ Сила: {att_bonus} (Пробой брони: {pierce}){money_text}\n\n"
             f"📜 История: {player['history'] or 'Скрыто'}")
             
     if player.get('avatar_id'):
@@ -195,7 +174,7 @@ def attack_menu(message):
                 return bot.send_message(message.chat.id, f"⏳ Ты слишком устал. Подожди 15 минут перед следующей атакой, осталось {mins} минут.")
         except: pass
 
-    # Только живые (hp > 0)
+    # Только живые игроки (hp > 0)
     targets = supabase.table('quest_players').select('user_id, users(name)').neq('user_id', user_id).gt('hp', 0).execute()
     markup = types.InlineKeyboardMarkup()
     for p in targets.data: markup.add(types.InlineKeyboardButton(f"⚔️ {p['users']['name']}", callback_data=f"atk_{p['user_id']}"))
@@ -253,15 +232,15 @@ def submit_mission(call):
     user_id, _ = get_or_create_player(call.from_user)
     mission = supabase.table('quest_missions').select('*').eq('id', mission_id).execute().data[0]
     
-    # Уведомляем мастера
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("✅ Принять", callback_data=f"acc_m_{mission_id}_{user_id}"))
     markup.add(types.InlineKeyboardButton("❌ Отклонить", callback_data=f"rej_m_{mission_id}"))
     try: 
-        bot.send_message(MASTER_TG_ID, f"📜 Игрок *{call.from_user.first_name}* сдал миссию:\n_{mission['text']}_", parse_mode='Markdown', reply_markup=markup)
+        # Без parse_mode, чтобы избежать ошибок спецсимволов
+        bot.send_message(MASTER_TG_ID, f"📜 Игрок {call.from_user.first_name} сдал миссию:\n{mission['text']}", reply_markup=markup)
     except Exception as e:
         print(f"Ошибка отправки Мастеру: {e}")
-        bot.send_message(call.message.chat.id, "⚠️ Не удалось отправить уведомление Мастеру. Возможно, он не нажал /start у бота.")
+        bot.send_message(call.message.chat.id, f"⚠️ Ошибка отправки Мастеру: {e}")
     
     bot.edit_message_text("Миссия отправлена Мастеру на проверку.", call.message.chat.id, call.message.message_id)
 
@@ -696,77 +675,84 @@ def master_faction_menu(call):
     bot.answer_callback_query(call.id)
     factions = supabase.table('quest_alliances').select('id, name').execute()
     markup = types.InlineKeyboardMarkup()
-    for f in factions.data: markup.add(types.InlineKeyboardButton(f"{f['name']}", callback_data=f"mf_{f['id']}"))
+    for f in factions.data: 
+        markup.add(types.InlineKeyboardButton(f"{f['name']}", callback_data=f"mfac_{f['id']}"))
     bot.edit_message_text("Выбери фракцию:", call.message.chat.id, call.message.message_id, reply_markup=markup)
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('mf_') and call.from_user.id == MASTER_TG_ID)
+@bot.callback_query_handler(func=lambda call: call.data.startswith('mfac_') and call.from_user.id == MASTER_TG_ID)
 def master_faction_action(call):
     bot.answer_callback_query(call.id)
     faction_id = call.data.split('_')[1]
     temp_master_data['faction_id'] = faction_id
     markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("Добавить игрока", callback_data="mf_add"))
-    markup.add(types.InlineKeyboardButton("Удалить игрока", callback_data="mf_rem"))
+    markup.add(types.InlineKeyboardButton("Добавить игрока", callback_data="mfa_add"))
+    markup.add(types.InlineKeyboardButton("Удалить игрока", callback_data="mfr_rem"))
     bot.edit_message_text("Действие с фракцией:", call.message.chat.id, call.message.message_id, reply_markup=markup)
 
-@bot.callback_query_handler(func=lambda call: call.data == 'mf_add' and call.from_user.id == MASTER_TG_ID)
+@bot.callback_query_handler(func=lambda call: call.data == 'mfa_add' and call.from_user.id == MASTER_TG_ID)
 def master_faction_add_menu(call):
     bot.answer_callback_query(call.id)
     faction_id = temp_master_data.get('faction_id')
+    if not faction_id: return bot.send_message(call.message.chat.id, "Ошибка: фракция не выбрана.")
+    
     existing = supabase.table('quest_alliance_members').select('user_id').eq('alliance_id', faction_id).execute()
     exclude_ids = [m['user_id'] for m in existing.data]
     players = supabase.table('quest_players').select('user_id, users(name)').execute()
     targets = [p for p in players.data if p['user_id'] not in exclude_ids]
     
-    # Сохраняем список ID в память для этой конкретной фракции
-    temp_master_data[f'mf_targets_{faction_id}'] = [p['user_id'] for p in targets]
+    temp_master_data['mf_targets'] = [p['user_id'] for p in targets]
     
     markup = types.InlineKeyboardMarkup()
     for idx, p in enumerate(targets): 
-        markup.add(types.InlineKeyboardButton(f"{p['users']['name']}", callback_data=f"mfadd_{faction_id}_{idx}"))
+        markup.add(types.InlineKeyboardButton(f"{p['users']['name']}", callback_data=f"mfadd_{idx}"))
     bot.edit_message_text("Кого добавить?", call.message.chat.id, call.message.message_id, reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('mfadd_') and call.from_user.id == MASTER_TG_ID)
 def master_faction_add_do(call):
     bot.answer_callback_query(call.id)
-    parts = call.data.split('_')
-    faction_id = parts[1]
-    idx = int(parts[2])
-    targets = temp_master_data.get(f'mf_targets_{faction_id}', [])
+    idx = int(call.data.split('_')[1])
+    targets = temp_master_data.get('mf_targets', [])
+    faction_id = temp_master_data.get('faction_id')
     
     if idx < len(targets) and faction_id:
-        supabase.table('quest_alliance_members').insert({'alliance_id': faction_id, 'user_id': targets[idx], 'status': 'accepted'}).execute()
-        bot.edit_message_text("Игрок добавлен.", call.message.chat.id, call.message.message_id)
+        try:
+            supabase.table('quest_alliance_members').insert({'alliance_id': faction_id, 'user_id': targets[idx], 'status': 'accepted'}).execute()
+            bot.edit_message_text("✅ Игрок добавлен.", call.message.chat.id, call.message.message_id)
+        except Exception as e:
+            bot.edit_message_text(f"❌ Ошибка добавления: {e}", call.message.chat.id, call.message.message_id)
     else:
-        bot.edit_message_text("Ошибка добавления (возможно, список устарел).", call.message.chat.id, call.message.message_id)
+        bot.edit_message_text("Ошибка: список устарел.", call.message.chat.id, call.message.message_id)
 
-@bot.callback_query_handler(func=lambda call: call.data == 'mf_rem' and call.from_user.id == MASTER_TG_ID)
+@bot.callback_query_handler(func=lambda call: call.data == 'mfr_rem' and call.from_user.id == MASTER_TG_ID)
 def master_faction_rem_menu(call):
     bot.answer_callback_query(call.id)
     faction_id = temp_master_data.get('faction_id')
+    if not faction_id: return bot.send_message(call.message.chat.id, "Ошибка: фракция не выбрана.")
+    
     members = supabase.table('quest_alliance_members').select('user_id, users(name)').eq('alliance_id', faction_id).execute()
     
-    # Сохраняем список участников в память
-    temp_master_data[f'mf_members_{faction_id}'] = [m['user_id'] for m in members.data]
+    temp_master_data['mf_members'] = [m['user_id'] for m in members.data]
     
     markup = types.InlineKeyboardMarkup()
     for idx, m in enumerate(members.data): 
-        markup.add(types.InlineKeyboardButton(f"{m['users']['name']}", callback_data=f"mfrem_{faction_id}_{idx}"))
+        markup.add(types.InlineKeyboardButton(f"{m['users']['name']}", callback_data=f"mfrem_{idx}"))
     bot.edit_message_text("Кого удалить?", call.message.chat.id, call.message.message_id, reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('mfrem_') and call.from_user.id == MASTER_TG_ID)
 def master_faction_rem_do(call):
     bot.answer_callback_query(call.id)
-    parts = call.data.split('_')
-    faction_id = parts[1]
-    idx = int(parts[2])
-    members = temp_master_data.get(f'mf_members_{faction_id}', [])
+    idx = int(call.data.split('_')[1])
+    members = temp_master_data.get('mf_members', [])
+    faction_id = temp_master_data.get('faction_id')
     
     if idx < len(members) and faction_id:
-        supabase.table('quest_alliance_members').delete().eq('alliance_id', faction_id).eq('user_id', members[idx]).execute()
-        bot.edit_message_text("Игрок удален.", call.message.chat.id, call.message.message_id)
+        try:
+            supabase.table('quest_alliance_members').delete().eq('alliance_id', faction_id).eq('user_id', members[idx]).execute()
+            bot.edit_message_text("✅ Игрок удален.", call.message.chat.id, call.message.message_id)
+        except Exception as e:
+            bot.edit_message_text(f"❌ Ошибка удаления: {e}", call.message.chat.id, call.message.message_id)
     else:
-        bot.edit_message_text("Ошибка удаления.", call.message.chat.id, call.message.message_id)
+        bot.edit_message_text("Ошибка: список устарел.", call.message.chat.id, call.message.message_id)
 
 @bot.callback_query_handler(func=lambda call: call.data == 'master_mission' and call.from_user.id == MASTER_TG_ID)
 def master_mission_menu(call):
@@ -909,7 +895,6 @@ def inventory(message):
         it = item['quest_items']
         eq = "✅" if item['is_equipped'] else ""
         
-        # Собираем описание бонусов
         bonuses = []
         if it.get('attack_bonus'): bonuses.append(f"⚔️+{it['attack_bonus']} Сила")
         if it.get('defense_bonus'): bonuses.append(f"🛡+{it['defense_bonus']} Броня")
