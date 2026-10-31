@@ -5,6 +5,7 @@ import uuid
 import os
 import math
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # --- НАСТРОЙКИ ---
@@ -81,6 +82,7 @@ def profile(message):
     status_emoji = '💀' if player['status'] == 'dead' else ('🩸' if player['status'] == 'wounded' else '🟢')
     hp_bar = f"❤️ {player['hp']}/{player['max_hp']}"
     
+    # Фракции отображаются в профиле
     text = (f"👤 *{message.from_user.first_name}*\nФракции: {factions}\nСтатус: {status_emoji} {player['status']}\n\n"
             f"❤️ Здоровье: {hp_bar}\n🛡 Броня: {player['defense']}\n"
             f"⚔️ Сила: {att_bonus} (Пробой брони: {pierce})\n"
@@ -97,17 +99,11 @@ def world_menu(message):
     user_id, _ = get_or_create_player(message.from_user)
     players = supabase.table('quest_players').select('user_id, status, users(name)').execute()
     
-    all_members = supabase.table('quest_alliance_members').select('user_id, quest_alliances(name)').eq('status', 'accepted').execute()
-    fac_map = {}
-    for m in all_members.data:
-        fac_map.setdefault(m['user_id'], []).append(m['quest_alliances']['name'])
-        
     markup = types.InlineKeyboardMarkup()
     for p in players.data:
         status_icon = '💀' if p['status'] == 'dead' else ('🩸' if p['status'] == 'wounded' else '🟢')
-        f_list = fac_map.get(p['user_id'], [])
-        fac_str = f" [{', '.join(f_list)}]" if f_list else ""
-        markup.add(types.InlineKeyboardButton(f"{status_icon} {p['users']['name']}{fac_str}", callback_data=f"view_{p['user_id']}"))
+        # Фракции убраны из кнопок, чтобы они не растягивались
+        markup.add(types.InlineKeyboardButton(f"{status_icon} {p['users']['name']}", callback_data=f"view_{p['user_id']}"))
     bot.send_message(message.chat.id, "🌍 *Жители мира:*", parse_mode='Markdown', reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('view_'))
@@ -119,6 +115,7 @@ def view_profile(call):
     factions = get_player_factions(target_id)
     
     status_emoji = '💀' if player['status'] == 'dead' else ('🩸' if player['status'] == 'wounded' else '🟢')
+    # Фракции отображаются в чужом профиле
     text = (f"👤 *{name}*\nФракции: {factions}\nСтатус: {status_emoji} {player['status']}\n"
             f"❤️ HP: {player['hp']}/{player['max_hp']}\n🛡 Броня: {player['defense']}\n"
             f"📜 История: {player['history'] or 'Скрыто'}")
@@ -195,7 +192,7 @@ def create_faction(call):
 def save_faction(message):
     forbidden = ['👤 Профиль', '⚔️ Напасть', '🎒 Инвентарь', '📜 Миссия', '🛡 Фракции', '🌍 Мир', '👑 Мастер']
     if message.text in forbidden:
-        return bot.send_message(message.chat.id, "Создание отменено (нажата кнопка меню).", reply_markup=get_main_keyboard(message.from_user.id))
+        return bot.send_message(message.chat.id, "Создание отменено.", reply_markup=get_main_keyboard(message.from_user.id))
     user_id, _ = get_or_create_player(message.from_user)
     a_res = supabase.table('quest_alliances').insert({'name': message.text, 'leader_id': user_id}).execute()
     supabase.table('quest_alliance_members').insert({'alliance_id': a_res.data[0]['id'], 'user_id': user_id, 'status': 'accepted'}).execute()
@@ -239,21 +236,17 @@ def send_invite(call):
         parts = call.data.split('_')
         faction_id, idx = parts[1], int(parts[2])
         user_id, _ = get_or_create_player(call.from_user)
-        
         existing = supabase.table('quest_alliance_members').select('user_id').eq('alliance_id', faction_id).execute()
         exclude_ids = [m['user_id'] for m in existing.data]
         players = supabase.table('quest_players').select('user_id, users(name)').execute()
         targets = [p for p in players.data if p['user_id'] not in exclude_ids]
-        
         if idx >= len(targets): return bot.send_message(call.message.chat.id, "Игрок не найден.")
         target_user_id = targets[idx]['user_id']
         u_res = supabase.table('users').select('telegram_id').eq('id', target_user_id).execute()
         target_tg_id = u_res.data[0]['telegram_id'] if u_res.data else None
-        
         existing = supabase.table('quest_alliance_members').select('*').eq('alliance_id', faction_id).eq('user_id', target_user_id).execute()
         if not existing.data:
             supabase.table('quest_alliance_members').insert({'alliance_id': faction_id, 'user_id': target_user_id, 'status': 'pending'}).execute()
-            
         if target_tg_id:
             fac_name = supabase.table('quest_alliances').select('name').eq('id', faction_id).execute().data[0]['name']
             markup = types.InlineKeyboardMarkup()
@@ -332,7 +325,9 @@ def col_atk_init_ally(call):
         target_fac = factions.data[idx]['id']
         target_name = factions.data[idx]['name']
         
-        atk_id = supabase.table('quest_collective_attacks').insert({'alliance_id': atk_fac, 'target_id': target_fac, 'initiator_id': user_id}).execute().data[0]['id']
+        atk_res = supabase.table('quest_collective_attacks').insert({'alliance_id': atk_fac, 'target_id': target_fac, 'initiator_id': user_id}).execute()
+        atk_id = atk_res.data[0]['id']
+        
         threading.Timer(60.0, execute_collective_attack, args=[atk_id, True]).start()
         
         members = supabase.table('quest_alliance_members').select('user_id').eq('alliance_id', atk_fac).eq('status', 'accepted').execute()
@@ -391,7 +386,9 @@ def col_atk_init_target(call):
         if idx >= len(players.data): return bot.send_message(call.message.chat.id, "Ошибка: игрок не найден. Попробуй заново.")
         target_id = players.data[idx]['user_id']
         
-        atk_id = supabase.table('quest_collective_attacks').insert({'alliance_id': faction_id, 'target_id': target_id, 'initiator_id': user_id}).execute().data[0]['id']
+        atk_res = supabase.table('quest_collective_attacks').insert({'alliance_id': faction_id, 'target_id': target_id, 'initiator_id': user_id}).execute()
+        atk_id = atk_res.data[0]['id']
+        
         threading.Timer(60.0, execute_collective_attack, args=[atk_id, False]).start()
         
         members = supabase.table('quest_alliance_members').select('user_id').eq('alliance_id', faction_id).eq('status', 'accepted').execute()
@@ -417,12 +414,16 @@ def col_atk_init_target(call):
 
 def execute_collective_attack(attack_id, is_alliance_target):
     try:
+        # 1. Получаем данные атаки
         atk = supabase.table('quest_collective_attacks').select('*').eq('id', attack_id).execute().data
         if not atk: return 
         attack = atk[0]
-        supabase.table('quest_collective_attacks').delete().eq('id', attack_id).execute()
+        
+        # 2. Считаем голоса (СНАЧАЛА СЧИТАЕМ, ПОТОМ УДАЛЯЕМ)
         votes = supabase.table('quest_collective_votes').select('user_id').eq('attack_id', attack_id).execute()
-        if not votes.data: return
+        if not votes.data: 
+            supabase.table('quest_collective_attacks').delete().eq('id', attack_id).execute()
+            return
             
         voter_ids = [v['user_id'] for v in votes.data]
         total_damage = 0
@@ -432,32 +433,37 @@ def execute_collective_attack(attack_id, is_alliance_target):
             total_damage += s
             total_pierce += p
             
+        # 3. Наносим урон
         if is_alliance_target:
             def_members = supabase.table('quest_alliance_members').select('user_id').eq('alliance_id', attack['target_id']).execute()
-            if not def_members.data: return
-            defenders = supabase.table('quest_players').select('user_id, defense, hp, max_hp').in_('user_id', [m['user_id'] for m in def_members.data]).execute()
-            if not defenders.data: return
-            total_defense = sum(d['defense'] for d in defenders.data)
-            effective_armor = max(0, total_defense - total_pierce)
-            net_damage = max(0, total_damage - effective_armor)
-            dmg_per_player = math.ceil(net_damage / len(defenders.data))
-            if dmg_per_player > 0:
-                for d in defenders.data:
-                    new_hp = max(0, d['hp'] - dmg_per_player)
-                    new_stat = 'dead' if new_hp <= 0 else ('wounded' if new_hp < 30 else 'alive')
-                    supabase.table('quest_players').update({'hp': new_hp, 'status': new_stat}).eq('user_id', d['user_id']).execute()
-            log_event(f"🔥 *ВОЙНА ФРАКЦИЙ!* Урон: {total_damage}. Пробито: {total_pierce}. Урон по HP: {dmg_per_player}.")
+            if def_members.data:
+                defenders = supabase.table('quest_players').select('user_id, defense, hp, max_hp').in_('user_id', [m['user_id'] for m in def_members.data]).execute()
+                if defenders.data:
+                    total_defense = sum(d['defense'] for d in defenders.data)
+                    effective_armor = max(0, total_defense - total_pierce)
+                    net_damage = max(0, total_damage - effective_armor)
+                    dmg_per_player = math.ceil(net_damage / len(defenders.data))
+                    if dmg_per_player > 0:
+                        for d in defenders.data:
+                            new_hp = max(0, d['hp'] - dmg_per_player)
+                            new_stat = 'dead' if new_hp <= 0 else ('wounded' if new_hp < 30 else 'alive')
+                            supabase.table('quest_players').update({'hp': new_hp, 'status': new_stat}).eq('user_id', d['user_id']).execute()
+                    log_event(f"🔥 *ВОЙНА ФРАКЦИЙ!* Урон: {total_damage}. Пробито: {total_pierce}. Урон по HP: {dmg_per_player}.")
         else:
-            defender = supabase.table('quest_players').select('*').eq('user_id', attack['target_id']).execute().data[0]
-            effective_armor = max(0, defender['defense'] - total_pierce)
-            damage = max(0, total_damage - effective_armor)
-            new_hp = max(0, defender['hp'] - damage)
-            new_stat = 'dead' if new_hp <= 0 else ('wounded' if new_hp < 30 else 'alive')
-            supabase.table('quest_players').update({'hp': new_hp, 'status': new_stat}).eq('user_id', attack['target_id']).execute()
-            log_event(f"🔥 Коллективная атака на игрока! Урон: {damage}.")
-        supabase.table('quest_collective_votes').delete().eq('attack_id', attack_id).execute()
+            defender = supabase.table('quest_players').select('*').eq('user_id', attack['target_id']).execute().data
+            if defender:
+                defender = defender[0]
+                effective_armor = max(0, defender['defense'] - total_pierce)
+                damage = max(0, total_damage - effective_armor)
+                new_hp = max(0, defender['hp'] - damage)
+                new_stat = 'dead' if new_hp <= 0 else ('wounded' if new_hp < 30 else 'alive')
+                supabase.table('quest_players').update({'hp': new_hp, 'status': new_stat}).eq('user_id', attack['target_id']).execute()
+                log_event(f"🔥 Коллективная атака на игрока! Урон: {damage}.")
+        
+        # 4. Удаляем атаку (и каскадом удаляются голоса)
+        supabase.table('quest_collective_attacks').delete().eq('id', attack_id).execute()
     except Exception as e:
-        print(f"Ошибка выполнения: {e}")
+        print(f"Ошибка выполнения атаки: {e}")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('vote_'))
 def col_atk_vote(call):
@@ -466,13 +472,23 @@ def col_atk_vote(call):
         attack_id = call.data.split('_')[1]
         user_id, _ = get_or_create_player(call.from_user)
         
-        existing = supabase.table('quest_collective_votes').select('*').eq('attack_id', attack_id).eq('user_id', user_id).execute()
-        if existing.data: return bot.send_message(call.message.chat.id, "Ты уже подтвердил удар.")
-
-        supabase.table('quest_collective_votes').insert({'attack_id': attack_id, 'user_id': user_id}).execute()
-        
+        # 1. Проверяем, существует ли еще атака
         atk = supabase.table('quest_collective_attacks').select('*').eq('id', attack_id).execute().data
-        if not atk: return bot.send_message(call.message.chat.id, "Атака уже завершена!")
+        if not atk: 
+            return bot.send_message(call.message.chat.id, "⏳ Время атаки истекло, или она уже завершена.")
+        
+        # 2. Проверяем, голосовал ли уже
+        existing = supabase.table('quest_collective_votes').select('*').eq('attack_id', attack_id).eq('user_id', user_id).execute()
+        if existing.data: 
+            return bot.send_message(call.message.chat.id, "Ты уже подтвердил удар.")
+
+        # 3. Пытаемся записать голос
+        try:
+            supabase.table('quest_collective_votes').insert({'attack_id': attack_id, 'user_id': user_id}).execute()
+        except Exception:
+            return bot.send_message(call.message.chat.id, "Атака уже завершилась, твой голос не засчитан.")
+
+        # 4. Считаем голоса
         attack = atk[0]
         members = supabase.table('quest_alliance_members').select('user_id').eq('alliance_id', attack['alliance_id']).eq('status', 'accepted').execute()
         votes = supabase.table('quest_collective_votes').select('user_id').eq('attack_id', attack_id).execute()
@@ -480,11 +496,11 @@ def col_atk_vote(call):
         if len(votes.data) >= len(members.data):
             is_ally = supabase.table('quest_alliances').select('id').eq('id', attack['target_id']).execute().data
             execute_collective_attack(attack_id, bool(is_ally))
-            bot.edit_message_text("Все собрались! Удар нанесен.", call.message.chat.id, call.message.message_id)
+            bot.edit_message_text("✅ Все собрались! Удар нанесен.", call.message.chat.id, call.message.message_id)
         else:
-            bot.edit_message_text(f"Ждем остальных... ({len(votes.data)}/{len(members.data)})", call.message.chat.id, call.message.message_id)
+            bot.edit_message_text(f"⏳ Ждем остальных... ({len(votes.data)}/{len(members.data)})", call.message.chat.id, call.message.message_id)
     except Exception as e:
-        bot.send_message(call.message.chat.id, f"Ошибка: {e}")
+        bot.send_message(call.message.chat.id, f"Критическая ошибка при голосовании: {e}")
 
 # --- ПАНЕЛЬ МАСТЕРА ---
 @bot.message_handler(func=lambda message: message.text == '👑 Мастер' and message.from_user.id == MASTER_TG_ID)
@@ -645,5 +661,11 @@ def run_server():
 
 threading.Thread(target=run_server, daemon=True).start()
 
+# --- ЗАПУСК С ЗАЩИТОЙ ОТ ПАДЕНИЙ ---
 print("Бот запущен...")
-bot.infinity_polling()
+while True:
+    try:
+        bot.infinity_polling(timeout=10, long_polling_timeout=5)
+    except Exception as e:
+        print(f"Критическая ошибка сети: {e}. Перезапуск через 5 секунд...")
+        time.sleep(5)
