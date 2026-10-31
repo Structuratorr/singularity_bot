@@ -19,7 +19,7 @@ bot = telebot.TeleBot(BOT_TOKEN)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 temp_avatars = {}
-temp_master_data = {} # Для хранения промежуточных данных мастера
+temp_master_data = {}
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 def get_or_create_player(tg_user):
@@ -71,9 +71,7 @@ def get_player_stats(user_id):
     return total_str, total_pierce
 
 def format_money(amount):
-    if amount >= 1000:
-        return f"{amount // 1000}K zł"
-    return f"{amount} zł"
+    return f"{amount} z₮"
 
 # --- ПРОФИЛИ И МИР ---
 @bot.message_handler(commands=['start'])
@@ -90,7 +88,6 @@ def profile(message):
     status_emoji = '🩸' if player['hp'] <= 0 else ('🟡' if player['hp'] < 5 else '🟢')
     hp_bar = f"❤️ {player['hp']}/{player['max_hp']}"
     
-    # Форматируем кулдаун
     cd_text = ""
     if player.get('last_attack_time'):
         try:
@@ -98,8 +95,8 @@ def profile(message):
             now = datetime.now(timezone.utc)
             diff = timedelta(minutes=15) - (now - last_atk)
             if diff.total_seconds() > 0:
-                mins, secs = divmod(diff.seconds, 60)
-                cd_text = f"\n⏳ Кулдаун атаки: {mins} мин."
+                mins = int(diff.total_seconds() // 60) + 1
+                cd_text = f"\n⏳ Отдых после атаки: {mins} мин."
         except: pass
 
     text = (f"👤 *{message.from_user.first_name}*\nФракции: {factions}\nСтатус: {status_emoji} {player['status']}\n\n"
@@ -158,7 +155,7 @@ def pay_amount(call):
     bot.answer_callback_query(call.id)
     target_id = call.data.split('_')[1]
     temp_master_data[f"pay_{call.from_user.id}"] = target_id
-    msg = bot.send_message(call.message.chat.id, "Введи сумму для перевода (в талерах):")
+    msg = bot.send_message(call.message.chat.id, "Введи сумму для перевода (в z₮):")
     bot.register_next_step_handler(msg, pay_execute)
 
 def pay_execute(message):
@@ -175,7 +172,6 @@ def pay_execute(message):
         if sender['star_thalers'] < amount:
             return bot.send_message(message.chat.id, "У тебя недостаточно талеров.")
             
-        # Переводим
         supabase.table('quest_players').update({'star_thalers': sender['star_thalers'] - amount}).eq('user_id', sender_id).execute()
         supabase.table('quest_players').update({'star_thalers': target['star_thalers'] + amount}).eq('user_id', target_id).execute()
         
@@ -189,18 +185,22 @@ def attack_menu(message):
     user_id, player = get_or_create_player(message.from_user)
     if player['hp'] <= 0: return bot.send_message(message.chat.id, "Ты ранен и не можешь нападать.")
     
-    # Проверка кулдауна
     if player.get('last_attack_time'):
         try:
             last_atk = datetime.fromisoformat(player['last_attack_time'].replace('Z', '+00:00'))
-            if datetime.now(timezone.utc) - last_atk < timedelta(minutes=15):
-                return bot.send_message(message.chat.id, "⏳ Ты слишком устал. Подожди 15 минут перед следующей атакой.")
+            now = datetime.now(timezone.utc)
+            diff = timedelta(minutes=15) - (now - last_atk)
+            if diff.total_seconds() > 0:
+                mins = int(diff.total_seconds() // 60) + 1
+                return bot.send_message(message.chat.id, f"⏳ Ты слишком устал. Подожди 15 минут перед следующей атакой, осталось {mins} минут.")
         except: pass
 
+    # Только живые (hp > 0)
     targets = supabase.table('quest_players').select('user_id, users(name)').neq('user_id', user_id).gt('hp', 0).execute()
     markup = types.InlineKeyboardMarkup()
     for p in targets.data: markup.add(types.InlineKeyboardButton(f"⚔️ {p['users']['name']}", callback_data=f"atk_{p['user_id']}"))
     if targets.data: bot.send_message(message.chat.id, "Выбери цель:", reply_markup=markup)
+    else: bot.send_message(message.chat.id, "Нет доступных целей (все либо ранены, либо это ты).")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('atk_'))
 def perform_attack(call):
@@ -208,25 +208,24 @@ def perform_attack(call):
     attacker_id, attacker = get_or_create_player(call.from_user)
     defender_id = call.data.split('_')[1]
     
-    atk_str, atk_pierce = get_player_stats(attacker_id)
     defender = supabase.table('quest_players').select('*, users(name)').eq('user_id', defender_id).execute().data[0]
-    
+    if defender['hp'] <= 0:
+        return bot.send_message(call.message.chat.id, "🩸 Он уже без сознания. Добивать раненых — дело Мастера.")
+
+    atk_str, atk_pierce = get_player_stats(attacker_id)
     effective_armor = max(0, defender['defense'] - atk_pierce)
-    damage = max(1, atk_str - effective_armor) # Минимум 1 урон
+    damage = max(1, atk_str - effective_armor)
     new_hp = max(0, defender['hp'] - damage)
-    
     new_status = 'wounded' if new_hp <= 0 else 'alive'
-    if new_hp <= 0: new_status = 'wounded'
     
-    # Обновляем данные
     supabase.table('quest_players').update({'hp': new_hp, 'status': new_status, 'last_attack_time': datetime.now(timezone.utc).isoformat()}).eq('user_id', attacker_id).execute()
     supabase.table('quest_players').update({'hp': new_hp, 'status': new_status}).eq('user_id', defender_id).execute()
     supabase.table('quest_attacks').insert({'attacker_id': attacker_id, 'defender_id': defender_id, 'damage': damage}).execute()
     
     bot.send_message(call.message.chat.id, f"Ты напал на {defender['users']['name']}!\nПробито брони: {atk_pierce}\nУрон: {damage}\nОстаток HP: {new_hp}.")
-    log_event(f"🩸 *{call.from_user.first_name}* атаковал *{defender['users']['name']}* на {damage} урона!")
+    log_event(f"💥 *Вспышка ярости!* *{call.from_user.first_name}* наносит удар по *{defender['users']['name']}*! Урон: {damage}. Осталось HP: {new_hp}.")
 
-# --- МИССИИ (ДЛЯ ИГРОКА) ---
+# --- МИССИИ (ИГРОК) ---
 @bot.message_handler(func=lambda message: message.text == '📜 Миссии')
 def missions_menu(message):
     user_id, _ = get_or_create_player(message.from_user)
@@ -258,8 +257,11 @@ def submit_mission(call):
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("✅ Принять", callback_data=f"acc_m_{mission_id}_{user_id}"))
     markup.add(types.InlineKeyboardButton("❌ Отклонить", callback_data=f"rej_m_{mission_id}"))
-    try: bot.send_message(MASTER_TG_ID, f"📜 Игрок *{call.from_user.first_name}* сдал миссию:\n_{mission['text']}_", parse_mode='Markdown', reply_markup=markup)
-    except: pass
+    try: 
+        bot.send_message(MASTER_TG_ID, f"📜 Игрок *{call.from_user.first_name}* сдал миссию:\n_{mission['text']}_", parse_mode='Markdown', reply_markup=markup)
+    except Exception as e:
+        print(f"Ошибка отправки Мастеру: {e}")
+        bot.send_message(call.message.chat.id, "⚠️ Не удалось отправить уведомление Мастеру. Возможно, он не нажал /start у бота.")
     
     bot.edit_message_text("Миссия отправлена Мастеру на проверку.", call.message.chat.id, call.message.message_id)
 
@@ -294,7 +296,6 @@ def faction_menu(message):
             markup.add(types.InlineKeyboardButton(f"❌ Отклонить: {inv['quest_alliances']['name']}", callback_data=f"decline_fac_{inv['alliance_id']}"))
     bot.send_message(message.chat.id, text, parse_mode='Markdown', reply_markup=markup)
 
-# (Функции управления фракциями оставляем без изменений, они были в предыдущем коде)
 @bot.callback_query_handler(func=lambda call: call.data == 'create_faction')
 def create_faction(call):
     bot.answer_callback_query(call.id)
@@ -556,7 +557,7 @@ def execute_collective_attack(attack_id, is_alliance_target):
                             new_hp = max(0, d['hp'] - dmg_per_player)
                             new_stat = 'wounded' if new_hp <= 0 else 'alive'
                             supabase.table('quest_players').update({'hp': new_hp, 'status': new_stat}).eq('user_id', d['user_id']).execute()
-                    log_event(f"🔥 *ВОЙНА ФРАКЦИЙ!* Урон: {total_damage}. Пробито: {total_pierce}. Урон по HP: {dmg_per_player}.")
+                    log_event(f"🔥 *ВОЙНА ФРАКЦИЙ!* Объединенные силы нанесли удар! Суммарный урон: {total_damage}. Пробито брони: {total_pierce}. Урон по HP: {dmg_per_player} каждому.")
         else:
             defender = supabase.table('quest_players').select('*').eq('user_id', attack['target_id']).execute().data
             if defender:
@@ -566,7 +567,7 @@ def execute_collective_attack(attack_id, is_alliance_target):
                 new_hp = max(0, defender['hp'] - damage)
                 new_stat = 'wounded' if new_hp <= 0 else 'alive'
                 supabase.table('quest_players').update({'hp': new_hp, 'status': new_stat}).eq('user_id', attack['target_id']).execute()
-                log_event(f"🔥 Коллективная атака на игрока! Урон: {damage}.")
+                log_event(f"🔥 *Сокрушительный удар фракции!* Игрок получил {damage} урона. Осталось HP: {new_hp}.")
         
         supabase.table('quest_collective_attacks').delete().eq('id', attack_id).execute()
     except Exception as e:
@@ -607,8 +608,8 @@ def col_atk_vote(call):
 @bot.message_handler(func=lambda message: message.text == '👑 Мастер' and message.from_user.id == MASTER_TG_ID)
 def master_panel(message):
     markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("💀 Убить (вне механики)", callback_data="master_kill"))
-    markup.add(types.InlineKeyboardButton("❤️ Воскресить всех", callback_data="master_revive_all"))
+    markup.add(types.InlineKeyboardButton("💀 Убить", callback_data="master_kill"))
+    markup.add(types.InlineKeyboardButton("❤️ Воскресить", callback_data="master_revive"))
     markup.add(types.InlineKeyboardButton("🎁 Выдать предмет", callback_data="master_give"))
     markup.add(types.InlineKeyboardButton("📜 Выдать миссию", callback_data="master_mission"))
     markup.add(types.InlineKeyboardButton("🛠 Изменить статы", callback_data="master_stats"))
@@ -617,6 +618,39 @@ def master_panel(message):
     markup.add(types.InlineKeyboardButton("📜 Установить историю", callback_data="master_set_history"))
     markup.add(types.InlineKeyboardButton("⚙️ Лог-Чат", callback_data="master_set_log"))
     bot.send_message(message.chat.id, "Панель Мастера:", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data == 'master_kill' and call.from_user.id == MASTER_TG_ID)
+def master_kill_menu(call):
+    bot.answer_callback_query(call.id)
+    all_players = supabase.table('quest_players').select('user_id, users(name)').neq('status', 'dead').execute()
+    markup = types.InlineKeyboardMarkup()
+    for p in all_players.data: markup.add(types.InlineKeyboardButton(f"Убить {p['users']['name']}", callback_data=f"mkill_{p['user_id']}"))
+    bot.edit_message_text("Кого казнить?", call.message.chat.id, call.message.message_id, reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('mkill_') and call.from_user.id == MASTER_TG_ID)
+def master_do_kill(call):
+    bot.answer_callback_query(call.id)
+    uid = call.data.split('_')[1]
+    supabase.table('quest_players').update({'status': 'dead', 'hp': 0}).eq('user_id', uid).execute()
+    bot.edit_message_text("Игрок казнен.", call.message.chat.id, call.message.message_id)
+    log_event(f"💀 *Мастер* вынес смертный приговор.")
+
+@bot.callback_query_handler(func=lambda call: call.data == 'master_revive' and call.from_user.id == MASTER_TG_ID)
+def master_revive_menu(call):
+    bot.answer_callback_query(call.id)
+    players = supabase.table('quest_players').select('user_id, users(name)').in_('status', ['dead', 'wounded']).execute()
+    if not players.data: return bot.edit_message_text("Некого воскрешать.", call.message.chat.id, call.message.message_id)
+    markup = types.InlineKeyboardMarkup()
+    for p in players.data: markup.add(types.InlineKeyboardButton(f"Воскресить {p['users']['name']}", callback_data=f"mrev_{p['user_id']}"))
+    bot.edit_message_text("Кого воскресить?", call.message.chat.id, call.message.message_id, reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('mrev_') and call.from_user.id == MASTER_TG_ID)
+def master_do_revive(call):
+    bot.answer_callback_query(call.id)
+    uid = call.data.split('_')[1]
+    supabase.table('quest_players').update({'status': 'alive', 'hp': 10}).eq('user_id', uid).execute()
+    bot.edit_message_text("Игрок исцелен (10 HP).", call.message.chat.id, call.message.message_id)
+    log_event(f"✨ *Мастер* даровал исцеление!")
 
 @bot.callback_query_handler(func=lambda call: call.data == 'master_stats' and call.from_user.id == MASTER_TG_ID)
 def master_stats_menu(call):
@@ -632,10 +666,8 @@ def master_stats_choose(call):
     target_id = call.data.split('_')[1]
     temp_master_data['stat_target'] = target_id
     markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("HP", callback_data="chstat_hp"))
-    markup.add(types.InlineKeyboardButton("Сила", callback_data="chstat_str"))
-    markup.add(types.InlineKeyboardButton("Броня", callback_data="chstat_def"))
-    markup.add(types.InlineKeyboardButton("Талеры", callback_data="chstat_mon"))
+    markup.add(types.InlineKeyboardButton("HP", callback_data="chstat_hp"), types.InlineKeyboardButton("Сила", callback_data="chstat_str"))
+    markup.add(types.InlineKeyboardButton("Броня", callback_data="chstat_def"), types.InlineKeyboardButton("Талеры", callback_data="chstat_mon"))
     bot.edit_message_text("Какой параметр изменить?", call.message.chat.id, call.message.message_id, reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('chstat_') and call.from_user.id == MASTER_TG_ID)
@@ -652,7 +684,6 @@ def master_stats_apply(message):
         target_id = temp_master_data.get('stat_target')
         stat = temp_master_data.get('stat_type')
         if not target_id or not stat: return bot.send_message(message.chat.id, "Ошибка.")
-        
         field = {'hp': 'hp', 'str': 'strength', 'def': 'defense', 'mon': 'star_thalers'}.get(stat)
         if field:
             supabase.table('quest_players').update({field: val}).eq('user_id', target_id).execute()
@@ -687,40 +718,55 @@ def master_faction_add_menu(call):
     players = supabase.table('quest_players').select('user_id, users(name)').execute()
     targets = [p for p in players.data if p['user_id'] not in exclude_ids]
     
+    # Сохраняем список ID в память для этой конкретной фракции
+    temp_master_data[f'mf_targets_{faction_id}'] = [p['user_id'] for p in targets]
+    
     markup = types.InlineKeyboardMarkup()
-    for idx, p in enumerate(targets): markup.add(types.InlineKeyboardButton(f"{p['users']['name']}", callback_data=f"mfadd_{idx}"))
-    temp_master_data['mf_targets'] = [p['user_id'] for p in targets]
+    for idx, p in enumerate(targets): 
+        markup.add(types.InlineKeyboardButton(f"{p['users']['name']}", callback_data=f"mfadd_{faction_id}_{idx}"))
     bot.edit_message_text("Кого добавить?", call.message.chat.id, call.message.message_id, reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('mfadd_') and call.from_user.id == MASTER_TG_ID)
 def master_faction_add_do(call):
     bot.answer_callback_query(call.id)
-    idx = int(call.data.split('_')[1])
-    targets = temp_master_data.get('mf_targets', [])
-    faction_id = temp_master_data.get('faction_id')
+    parts = call.data.split('_')
+    faction_id = parts[1]
+    idx = int(parts[2])
+    targets = temp_master_data.get(f'mf_targets_{faction_id}', [])
+    
     if idx < len(targets) and faction_id:
         supabase.table('quest_alliance_members').insert({'alliance_id': faction_id, 'user_id': targets[idx], 'status': 'accepted'}).execute()
         bot.edit_message_text("Игрок добавлен.", call.message.chat.id, call.message.message_id)
+    else:
+        bot.edit_message_text("Ошибка добавления (возможно, список устарел).", call.message.chat.id, call.message.message_id)
 
 @bot.callback_query_handler(func=lambda call: call.data == 'mf_rem' and call.from_user.id == MASTER_TG_ID)
 def master_faction_rem_menu(call):
     bot.answer_callback_query(call.id)
     faction_id = temp_master_data.get('faction_id')
     members = supabase.table('quest_alliance_members').select('user_id, users(name)').eq('alliance_id', faction_id).execute()
+    
+    # Сохраняем список участников в память
+    temp_master_data[f'mf_members_{faction_id}'] = [m['user_id'] for m in members.data]
+    
     markup = types.InlineKeyboardMarkup()
-    for idx, m in enumerate(members.data): markup.add(types.InlineKeyboardButton(f"{m['users']['name']}", callback_data=f"mfrem_{idx}"))
-    temp_master_data['mf_members'] = [m['user_id'] for m in members.data]
+    for idx, m in enumerate(members.data): 
+        markup.add(types.InlineKeyboardButton(f"{m['users']['name']}", callback_data=f"mfrem_{faction_id}_{idx}"))
     bot.edit_message_text("Кого удалить?", call.message.chat.id, call.message.message_id, reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('mfrem_') and call.from_user.id == MASTER_TG_ID)
 def master_faction_rem_do(call):
     bot.answer_callback_query(call.id)
-    idx = int(call.data.split('_')[1])
-    members = temp_master_data.get('mf_members', [])
-    faction_id = temp_master_data.get('faction_id')
+    parts = call.data.split('_')
+    faction_id = parts[1]
+    idx = int(parts[2])
+    members = temp_master_data.get(f'mf_members_{faction_id}', [])
+    
     if idx < len(members) and faction_id:
         supabase.table('quest_alliance_members').delete().eq('alliance_id', faction_id).eq('user_id', members[idx]).execute()
         bot.edit_message_text("Игрок удален.", call.message.chat.id, call.message.message_id)
+    else:
+        bot.edit_message_text("Ошибка удаления.", call.message.chat.id, call.message.message_id)
 
 @bot.callback_query_handler(func=lambda call: call.data == 'master_mission' and call.from_user.id == MASTER_TG_ID)
 def master_mission_menu(call):
@@ -750,7 +796,6 @@ def master_accept_mission(call):
     parts = call.data.split('_')
     mission_id, user_id = parts[2], parts[3]
     supabase.table('quest_missions').update({'status': 'completed'}).eq('id', mission_id).execute()
-    
     u_res = supabase.table('users').select('telegram_id').eq('id', user_id).execute()
     if u_res.data and u_res.data[0]['telegram_id']:
         try: bot.send_message(u_res.data[0]['telegram_id'], "✅ Мастер принял твою миссию!")
@@ -763,30 +808,6 @@ def master_reject_mission(call):
     mission_id = call.data.split('_')[2]
     supabase.table('quest_missions').update({'status': 'active'}).eq('id', mission_id).execute()
     bot.edit_message_text("Миссия отклонена (возвращена в активные).", call.message.chat.id, call.message.message_id)
-
-# (Функции Master Kill, Revive, Give Item, Set Avatar, Set History, Set Log остаются без изменений)
-# ... (Оставляем их для совместимости)
-
-@bot.callback_query_handler(func=lambda call: call.data == 'master_kill' and call.from_user.id == MASTER_TG_ID)
-def master_kill_menu(call):
-    bot.answer_callback_query(call.id)
-    all_players = supabase.table('quest_players').select('user_id, users(name)').neq('status', 'dead').execute()
-    markup = types.InlineKeyboardMarkup()
-    for p in all_players.data: markup.add(types.InlineKeyboardButton(f"Убить {p['users']['name']}", callback_data=f"mkill_{p['user_id']}"))
-    bot.edit_message_text("Кого казнить?", call.message.chat.id, call.message.message_id, reply_markup=markup)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('mkill_') and call.from_user.id == MASTER_TG_ID)
-def master_do_kill(call):
-    bot.answer_callback_query(call.id)
-    uid = call.data.split('_')[1]
-    supabase.table('quest_players').update({'status': 'dead', 'hp': 0}).eq('user_id', uid).execute()
-    bot.edit_message_text("Игрок мертв.", call.message.chat.id, call.message.message_id)
-
-@bot.callback_query_handler(func=lambda call: call.data == 'master_revive_all' and call.from_user.id == MASTER_TG_ID)
-def master_revive(call):
-    bot.answer_callback_query(call.id)
-    supabase.table('quest_players').update({'status': 'alive', 'hp': 10, 'defense': 2}).neq('user_id', '').execute()
-    bot.send_message(call.message.chat.id, "Все игроки воскрешены с 10 HP!")
 
 @bot.callback_query_handler(func=lambda call: call.data == 'master_give' and call.from_user.id == MASTER_TG_ID)
 def master_give_menu(call):
@@ -887,8 +908,19 @@ def inventory(message):
     for item in res.data:
         it = item['quest_items']
         eq = "✅" if item['is_equipped'] else ""
-        text += f"▪️ {it['name']} {eq}\n"
-        if not item['is_equipped']: markup.add(types.InlineKeyboardButton(f"Надеть {it['name']}", callback_data=f"equip_{item['id']}"))
+        
+        # Собираем описание бонусов
+        bonuses = []
+        if it.get('attack_bonus'): bonuses.append(f"⚔️+{it['attack_bonus']} Сила")
+        if it.get('defense_bonus'): bonuses.append(f"🛡+{it['defense_bonus']} Броня")
+        if it.get('armor_pierce'): bonuses.append(f"🩸Пробитие {it['armor_pierce']}")
+        
+        bonus_text = ", ".join(bonuses) if bonuses else "Без бонусов"
+        text += f"▪️ *{it['name']}* {eq}\n_{it.get('description') or 'Без описания'}_\n({bonus_text})\n\n"
+        
+        if not item['is_equipped']: 
+            markup.add(types.InlineKeyboardButton(f"Надеть {it['name']}", callback_data=f"equip_{item['id']}"))
+            
     bot.send_message(message.chat.id, text, parse_mode='Markdown', reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('equip_'))
