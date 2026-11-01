@@ -32,33 +32,18 @@ def is_attacks_enabled():
 def get_or_create_player(tg_user):
     tg_id = tg_user.id
     name = tg_user.first_name
-    
-    # 1. Ищем по Telegram ID (как обычно)
     res = supabase.table('users').select('*').eq('telegram_id', tg_id).execute()
-    
     if not res.data:
-        # 2. Если не нашли, ищем предзагруженного персонажа с таким же именем (и без Telegram ID)
-        res_name = supabase.table('users').select('*').eq('name', name).is_('telegram_id', 'null').execute()
-        
-        if res_name.data:
-            # Нашли! Привязываем Telegram ID к существующей анкете
-            user_id = res_name.data[0]['id']
-            supabase.table('users').update({'telegram_id': tg_id}).eq('id', user_id).execute()
-        else:
-            # 3. Если и по имени нет, создаем абсолютно нового
-            new_id = str(uuid.uuid4())
-            supabase.table('users').insert({'id': new_id, 'name': name, 'telegram_id': tg_id}).execute()
-            user_id = new_id
-            supabase.table('quest_players').insert({'user_id': user_id, 'hp': 10, 'max_hp': 10, 'defense': 2, 'strength': 2}).execute()
+        new_id = str(uuid.uuid4())
+        supabase.table('users').insert({'id': new_id, 'name': name, 'telegram_id': tg_id}).execute()
+        user_id = new_id
     else:
         user_id = res.data[0]['id']
     
-    # Проверяем, есть ли запись в quest_players (на случай сбоя)
     q_res = supabase.table('quest_players').select('*').eq('user_id', user_id).execute()
     if not q_res.data:
         supabase.table('quest_players').insert({'user_id': user_id, 'hp': 10, 'max_hp': 10, 'defense': 2, 'strength': 2}).execute()
         q_res = supabase.table('quest_players').select('*').eq('user_id', user_id).execute()
-        
     return user_id, q_res.data[0]
 
 def get_player_factions(user_id):
@@ -721,16 +706,13 @@ def master_bind_do(call):
         tg_id = u_res.data[0]['telegram_id']
         
         try:
-            # 1. Обнуляем лидерство, чтобы фракции не удалились каскадно
-            supabase.table('quest_alliances').update({'leader_id': None}).eq('leader_id', target_user_id).execute()
+            # 1. Отвязываем telegram_id от старого аккаунта (он становится "спящим")
+            supabase.table('users').update({'telegram_id': None}).eq('id', target_user_id).execute()
             
-            # 2. Удаляем старый профиль (освобождаем telegram_id)
-            supabase.table('users').delete().eq('id', target_user_id).execute()
-            
-            # 3. Привязываем telegram_id к новому NPC
+            # 2. Привязываем telegram_id к новому персонажу
             supabase.table('users').update({'telegram_id': tg_id}).eq('id', npc_id).execute()
             
-            bot.edit_message_text(f"✅ Успешно! Игрок теперь управляет персонажем. Нажми /start", call.message.chat.id, call.message.message_id)
+            bot.edit_message_text(f"✅ Успешно! Теперь ты играешь за нового персонажа. Нажми /start", call.message.chat.id, call.message.message_id)
         except Exception as e:
             bot.edit_message_text(f"❌ Ошибка привязки: {e}", call.message.chat.id, call.message.message_id)
     else:
