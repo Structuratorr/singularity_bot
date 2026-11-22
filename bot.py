@@ -1191,6 +1191,146 @@ def check_guest_expirations():
 threading.Thread(target=check_guest_expirations, daemon=True).start()
 
 # --- ВЕБ-СЕРВЕР ---
+# --- ВПИСЧИКИ КОММУНЫ ---
+
+def is_curator(tg_id):
+    if tg_id == MASTER_TG_ID: return True
+    res = supabase.table('commune_curators').select('telegram_id').eq('telegram_id', tg_id).execute()
+    return len(res.data) > 0
+
+@bot.message_handler(commands=['guest'])
+def add_guest(message):
+    if not is_curator(message.from_user.id):
+        return bot.reply_to(message, "⛔ Только кураторы коммуны могут запускать голосование.")
+        
+    args = message.text.split()
+    if len(args) < 3:
+        return bot.reply_to(message, "Использование: `/guest @username <дней|permanent>`\nПример: `/guest @ivan 5` или `/guest @ivan permanent`", parse_mode='Markdown')
+        
+    username = args[1]
+    if not username.startswith('@'):
+        username = '@' + username
+        
+    duration = args[2]
+    is_permanent = False
+    days = 0
+    
+    if duration.lower() == 'permanent':
+        if message.from_user.id != MASTER_TG_ID:
+            return bot.reply_to(message, "⛔ Только Мастер может установить бессрочное пребывание.")
+        is_permanent = True
+    else:
+        try:
+            days = int(duration)
+        except ValueError:
+            return bot.reply_to(message, "❌ Укажи количество дней (число) или 'permanent'.")
+            
+    # Генерируем ID прямо в Python, чтобы не зависеть от ответа базы
+    guest_id = str(uuid.uuid4())
+    guest_data = {
+        'id': guest_id,
+        'username': username,
+        'curator_id': message.from_user.id,
+        'status': 'voting',
+        'is_permanent': is_permanent
+    }
+    
+    try:
+        supabase.table('commune_guests').insert(guest_data).execute()
+    except Exception as e:
+        print(f"ОШИБКА БАЗЫ: {e}")
+        return bot.reply_to(message, f"❌ Ошибка базы данных: {e}")
+    
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("✅ Да", callback_data=f"v_yes_{guest_id}"))
+    markup.add(types.InlineKeyboardButton("💡 Да, аргумент на улучшение", callback_data=f"v_yes_arg_{guest_id}"))
+    markup.add(types.InlineKeyboardButton("❌ Нет, аргумент против", callback_data=f"v_no_arg_{guest_id}"))
+    
+    text = (f"🏠 *Голосование за впис:* {username}\n"
+            f"Куратор: [{message.from_user.first_name}](tg://user?id={message.from_user.id})\n"
+            f"Срок: {'Бессрочно' if is_permanent else f'{days} дн.'}\n\n"
+            f"⏳ Таймер: 3 часа.")
+            
+    try:
+        msg = bot.send_message(message.chat.id, text, parse_mode='Markdown', reply_markup=markup)
+        supabase.table('commune_guests').update({'message_id': msg.message_id}).eq('id', guest_id).execute()
+    except Exception as e:
+        print(f"ОШИБКА ОТПРАВКИ: {e}")
+        return bot.reply_to(message, f"❌ Ошибка при отправке сообщения: {e}")
+    
+    # Таймер на 3 часа (10800 секунд)
+    threading.Timer(10800, process_vote_result, args=[guest_id, message.chat.id, days]).start()
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('v_'))
+def handle_guest_vote(call):
+    bot.answer_callback_query(call.id)
+    parts = call.data.split('_')
+    vote_type = parts[1]
+    guest_id = parts[2]
+    
+    if vote_type == 'yes':
+        bot.send_message(call.message.chat.id, f"✅ {call.from_user.first_name} проголосовал ЗА.")
+    elif vote_type == 'yes_arg':
+        msg = bot.send_message(call.message.chat.id, f"💡 {call.from_user.first_name}, напиши свой аргумент на улучшение (следующим сообщением):")
+        bot.register_next_step_handler(msg, save_pro_argument, guest_id)
+    elif vote_type == 'no_arg':
+        msg = bot.send_message(call.message.chat.id, f"❌ {call.from_user.first_name}, напиши аргумент ПРОТИВ (следующим сообщением):")
+        bot.register_next_step_handler(msg, save_contra_argument, guest_id, call.message.chat.id)
+
+def save_pro_argument(message, guest_id):
+    supabase.table('commune_guests').update({'pro_argument': message.text}).eq('id', guest_id).execute()
+    bot.send_message(message.chat.id, "Аргумент 'За' сохранен.")
+
+def save_contra_argument(message, guest_id, chat_id):
+    supabase.table('commune_guests').update({'contra_argument': message.text, 'status': 'rejected'}).eq('id', guest_id).execute()
+    bot.send_message(message.chat.id, "❌ Аргумент 'Против' сохранен. Гость отклонен.")
+    
+    guest_data = supabase.table('commune_guests').select('message_id').eq('id', guest_id).execute().data[0]
+    if guest_data and guest_data.get('message_id'):
+        try: 
+            bot.edit_message_text("❌ Голосование отменено. Поступил аргумент против.", chat_id, guest_data['message_id'])
+        except: pass
+
+def process_vote_result(guest_id, chat_id, days):
+    res = supabase.table('commune_guests').select('*').eq('id', guest_id).execute()
+    if not res.data: return
+    guest = res.data[0]
+    
+    if guest['status'] != 'voting': return 
+    
+    now = datetime.now(timezone.utc)
+    end_date = None if guest['is_permanent'] else (now + timedelta(days=days)).isoformat()
+    
+    supabase.table('commune_guests').update({
+        'status': 'active',
+        'start_date': now.isoformat(),
+        'end_date': end_date
+    }).eq('id', guest_id).execute()
+    
+    text = f"✅ *Голосование завершено!*\nГость {guest['username']} принят на {'бессрочно' if guest['is_permanent'] else f'{days} дн.'}"
+    bot.send_message(chat_id, text, parse_mode='Markdown')
+    if guest.get('message_id'):
+        try: bot.edit_message_text(text, chat_id, guest['message_id'], parse_mode='Markdown')
+        except: pass
+
+# Фоновый поток для напоминаний
+def check_guest_expirations():
+    while True:
+        try:
+            now = datetime.now(timezone.utc)
+            warning_date = (now + timedelta(days=2)).isoformat()
+            res = supabase.table('commune_guests').select('*').eq('status', 'active').eq('is_permanent', False).lte('end_date', warning_date).gte('end_date', now.isoformat()).execute()
+            
+            for guest in res.data:
+                try:
+                    bot.send_message(MASTER_TG_ID, f"⚠️ У гостя {guest['username']} впис заканчивается {guest['end_date'][:10]}! Продлить или выселить?")
+                except: pass
+        except Exception as e:
+            print(f"Error in reminder thread: {e}")
+        time.sleep(86400) # Проверка раз в сутки
+
+threading.Thread(target=check_guest_expirations, daemon=True).start()
+
 class DummyHandler(BaseHTTPRequestHandler):
     def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"Bot is alive")
     def do_HEAD(self): self.send_response(200); self.end_headers()
