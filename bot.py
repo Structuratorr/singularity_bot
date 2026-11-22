@@ -1367,24 +1367,21 @@ def bind_community(message):
 @bot.message_handler(commands=['tasks', 'задачи'])
 def show_tasks(message):
     try:
-        bot.reply_to(message, "🔍 Ищу задачи для этого чата...") # Дебаг
+        bot.reply_to(message, "🔍 Ищу задачи для этого чата...")
         
         comm = get_community_by_chat(message.chat.id)
         if not comm:
             return bot.reply_to(message, "⚠️ Этот чат не привязан к сообществу. Напиши `/bind Название`.")
             
-        res = supabase.table('tasks').select('id, title, status').eq('community_id', comm['id']).is_('deleted_at', null).execute()
+        # ИСПРАВЛЕНО: 'null' в кавычках
+        res = supabase.table('tasks').select('id, title, status').eq('community_id', comm['id']).is_('deleted_at', 'null').execute()
         if not res.data:
             return bot.reply_to(message, "В этом сообществе пока нет задач.")
             
         markup = types.InlineKeyboardMarkup()
         for t in res.data:
-            # Берем статус и делаем красивую иконку
             status = t.get('status', 'open')
             icon = '🟢' if status == 'open' else ('🟡' if status == 'in_progress' else '✅')
-            
-            # ВАЖНО: В кнопке callback_data должно быть только латинские буквы, цифры и дефисы/двоеточия. 
-            # UUID задачи содержит дефисы, это нормально.
             markup.add(types.InlineKeyboardButton(f"{icon} {t['title']}", callback_data=f"t_view:{t['id']}"))
             
         bot.reply_to(message, f"📋 <b>Задачи сообщества {comm['name']}</b>:", parse_mode='HTML', reply_markup=markup)
@@ -1418,7 +1415,8 @@ def view_task_chat(call):
         elif task.get('status') == 'in_progress':
             markup.add(types.InlineKeyboardButton("📤 Отправить на проверку", callback_data=f"t_submit:{task_id}"))
         
-        checklist = supabase.table('checklist_items').select('id').eq('task_id', task_id).is_('deleted_at', null).execute()
+        # ИСПРАВЛЕНО: 'null' в кавычках
+        checklist = supabase.table('checklist_items').select('id').eq('task_id', task_id).is_('deleted_at', 'null').execute()
         if checklist.data:
             markup.add(types.InlineKeyboardButton("📝 Чек-лист", callback_data=f"t_check:{task_id}"))
             
@@ -1465,7 +1463,8 @@ def show_checklist_chat(call):
     bot.answer_callback_query(call.id)
     task_id = call.data.split(':')[1]
     
-    res = supabase.table('checklist_items').select('*').eq('task_id', task_id).is_('deleted_at', null).order('order_index').execute()
+    # ИСПРАВЛЕНО: 'null' в кавычках
+    res = supabase.table('checklist_items').select('*').eq('task_id', task_id).is_('deleted_at', 'null').order('order_index').execute()
     
     markup = types.InlineKeyboardMarkup()
     for item in res.data:
