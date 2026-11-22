@@ -1107,9 +1107,9 @@ def add_guest(message):
         supabase.table('commune_guests').insert(guest_data).execute()
         
         markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("✅ Да", callback_data=f"vote_yes_{guest_id}"))
-        markup.add(types.InlineKeyboardButton("💡 Да, аргумент", callback_data=f"vote_yes_arg_{guest_id}"))
-        markup.add(types.InlineKeyboardButton("❌ Нет, аргумент", callback_data=f"vote_no_arg_{guest_id}"))
+        markup.add(types.InlineKeyboardButton("✅ Да", callback_data=f"vote:yes:{guest_id}"))
+        markup.add(types.InlineKeyboardButton("💡 Да, аргумент", callback_data=f"vote:yes_arg:{guest_id}"))
+        markup.add(types.InlineKeyboardButton("❌ Нет, аргумент", callback_data=f"vote:no_arg:{guest_id}"))
         
         # Используем HTML вместо Markdown
         text = (f"🏠 <b>Голосование за впис:</b> {username}\n"
@@ -1125,10 +1125,10 @@ def add_guest(message):
     except Exception as e:
         bot.reply_to(message, f"💥 ОШИБКА: {str(e)}")
         
-@bot.callback_query_handler(func=lambda call: call.data.startswith('vote_'))
+@bot.callback_query_handler(func=lambda call: call.data.startswith('vote:'))
 def handle_guest_vote(call):
     bot.answer_callback_query(call.id)
-    parts = call.data.split('_')
+    parts = call.data.split(':')
     vote_type = parts[1]
     guest_id = parts[2]
     
