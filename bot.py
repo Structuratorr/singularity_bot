@@ -1135,7 +1135,7 @@ def add_guest(message):
         print(error_text) # Выведет в логи Render
         bot.reply_to(message, f"💥 КРИТИЧЕСКАЯ ОШИБКА:\n`{str(e)}`", parse_mode='Markdown')
         
-@bot.callback_query_handler(func=lambda call: call.data.startswith('v_'))
+@bot.callback_query_handler(func=lambda call: call.data.startswith('vote_'))
 def handle_guest_vote(call):
     bot.answer_callback_query(call.id)
     parts = call.data.split('_')
@@ -1150,7 +1150,7 @@ def handle_guest_vote(call):
     elif vote_type == 'no_arg':
         msg = bot.send_message(call.message.chat.id, f"❌ {call.from_user.first_name}, напиши аргумент ПРОТИВ (следующим сообщением):")
         bot.register_next_step_handler(msg, save_contra_argument, guest_id, call.message.chat.id)
-
+        
 def save_pro_argument(message, guest_id):
     supabase.table('commune_guests').update({'pro_argument': message.text}).eq('id', guest_id).execute()
     bot.send_message(message.chat.id, "Аргумент 'За' сохранен.")
