@@ -1338,6 +1338,147 @@ def check_guest_expirations():
 
 threading.Thread(target=check_guest_expirations, daemon=True).start()
 
+# --- ЗАДАЧИ В ЧАТЕ СООБЩЕСТВА ---
+
+def get_community_by_chat(chat_id):
+    res = supabase.table('communities').select('*').eq('telegram_chat_id', chat_id).execute()
+    return res.data[0] if res.data else None
+
+@bot.message_handler(commands=['bind'])
+def bind_community(message):
+    # Только админ или лидер может привязать чат
+    # (Для простоты проверяем только MASTER_TG_ID, но можно расширить)
+    if message.from_user.id != MASTER_TG_ID:
+        return bot.reply_to(message, "⛔ Только Мастер может привязать чат к сообществу.")
+    
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        return bot.reply_to(message, "Использование: `/bind Название сообщества`\nПример: `/bind Бестиарий`")
+    
+    comm_name = args[1]
+    res = supabase.table('communities').select('id, name').eq('name', comm_name).execute()
+    if not res.data:
+        return bot.reply_to(message, f"❌ Сообщество '{comm_name}' не найдено.")
+    
+    comm_id = res.data[0]['id']
+    supabase.table('communities').update({'telegram_chat_id': message.chat.id}).eq('id', comm_id).execute()
+    bot.reply_to(message, f"✅ Этот чат успешно привязан к сообществу *{comm_name}*!\nТеперь пиши /tasks чтобы увидеть задачи.", parse_mode='Markdown')
+
+@bot.message_handler(commands=['tasks', 'задачи'])
+def show_tasks(message):
+    comm = get_community_by_chat(message.chat.id)
+    if not comm:
+        return bot.reply_to(message, "⚠️ Этот чат не привязан к сообществу. Напиши `/bind Название`.")
+        
+    res = supabase.table('tasks').select('id, title, status').eq('community_id', comm['id']).is_('deleted_at', null).execute()
+    if not res.data:
+        return bot.reply_to(message, "В этом сообществе пока нет задач.")
+        
+    markup = types.InlineKeyboardMarkup()
+    for t in res.data:
+        icon = '🟢' if t['status'] == 'open' else ('🟡' if t['status'] == 'in_progress' else '✅')
+        markup.add(types.InlineKeyboardButton(f"{icon} {t['title']}", callback_data=f"t_view:{t['id']}"))
+        
+    bot.reply_to(message, f"📋 <b>Задачи сообщества {comm['name']}</b>:", parse_mode='HTML', reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('t_view:'))
+def view_task_chat(call):
+    bot.answer_callback_query(call.id)
+    task_id = call.data.split(':')[1]
+    
+    res = supabase.table('tasks').select('*, task_assignees(*, users(name))').eq('id', task_id).execute()
+    if not res.data: return
+    task = res.data[0]
+    
+    # Формируем текст
+    assignees = ", ".join([a['users']['name'] for a in task.get('task_assignees', [])]) if task.get('task_assignees') else "Нет"
+    status_ru = {'open': 'Открыта', 'in_progress': 'В работе', 'review': 'На проверке', 'completed': 'Завершена'}.get(task['status'], task['status'])
+    
+    text = f"📌 <b>{task['title']}</b>\n"
+    text += f"Статус: {status_ru}\n"
+    text += f"Баллы: {task['points']}\n"
+    text += f"Исполнители: {assignees}\n\n"
+    if task.get('description'):
+        text += f"<i>{task['description']}</i>"
+        
+    markup = types.InlineKeyboardMarkup()
+    
+    # Кнопки действий со статусом
+    if task['status'] == 'open':
+        markup.add(types.InlineKeyboardButton("✋ Взять в работу", callback_data=f"t_take:{task_id}"))
+    elif task['status'] == 'in_progress':
+        markup.add(types.InlineKeyboardButton("📤 Отправить на проверку", callback_data=f"t_submit:{task_id}"))
+    
+    # Кнопка чек-листа (если он есть)
+    checklist = supabase.table('checklist_items').select('id').eq('task_id', task_id).is_('deleted_at', null).execute()
+    if checklist.data:
+        markup.add(types.InlineKeyboardButton("📝 Чек-лист", callback_data=f"t_check:{task_id}"))
+        
+    markup.add(types.InlineKeyboardButton("⬅️ Назад к задачам", callback_data="t_back"))
+    
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode='HTML', reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data == 't_back')
+def back_to_tasks(call):
+    bot.answer_callback_query(call.id)
+    show_tasks(call.message)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('t_take:'))
+def take_task_chat(call):
+    bot.answer_callback_query(call.id)
+    task_id = call.data.split(':')[1]
+    
+    # Получаем user_id по telegram_id
+    u_res = supabase.table('users').select('id').eq('telegram_id', call.from_user.id).execute()
+    if not u_res.data:
+        return bot.answer_callback_query(call.id, "Ошибка: ты не зарегистрирован на портале. Зайди через Mini App.", show_alert=True)
+    user_id = u_res.data[0]['id']
+    
+    supabase.table('task_assignees').upsert({'task_id': task_id, 'user_id': user_id, 'status': 'in_progress'}, on_conflict='task_id,user_id').execute()
+    supabase.table('tasks').update({'status': 'in_progress'}).eq('id', task_id).execute()
+    
+    view_task_chat(call)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('t_submit:'))
+def submit_task_chat(call):
+    bot.answer_callback_query(call.id)
+    task_id = call.data.split(':')[1]
+    
+    u_res = supabase.table('users').select('id').eq('telegram_id', call.from_user.id).execute()
+    user_id = u_res.data[0]['id'] if u_res.data else None
+    
+    supabase.table('tasks').update({'status': 'review', 'completed_by_id': user_id}).eq('id', task_id).execute()
+    view_task_chat(call)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('t_check:'))
+def show_checklist_chat(call):
+    bot.answer_callback_query(call.id)
+    task_id = call.data.split(':')[1]
+    
+    res = supabase.table('checklist_items').select('*').eq('task_id', task_id).is_('deleted_at', null).order('order_index').execute()
+    
+    markup = types.InlineKeyboardMarkup()
+    for item in res.data:
+        icon = "✅" if item['is_completed'] else "⬜️"
+        markup.add(types.InlineKeyboardButton(f"{icon} {item['text']}", callback_data=f"chk:{item['id']}"))
+        
+    markup.add(types.InlineKeyboardButton("⬅️ Назад к задаче", callback_data=f"t_view:{task_id}"))
+    bot.edit_message_text("📝 <b>Чек-лист:</b>", call.message.chat.id, call.message.message_id, parse_mode='HTML', reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('chk:'))
+def toggle_checklist_chat(call):
+    bot.answer_callback_query(call.id)
+    item_id = call.data.split(':')[1]
+    
+    # Получаем текущий статус
+    res = supabase.table('checklist_items').select('is_completed').eq('id', item_id).execute()
+    if res.data:
+        new_status = not res.data[0]['is_completed']
+        supabase.table('checklist_items').update({'is_completed': new_status}).eq('id', item_id).execute()
+    
+    # Обновляем сообщение
+    show_checklist_chat(call)
+
 class DummyHandler(BaseHTTPRequestHandler):
     def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"Bot is alive")
     def do_HEAD(self): self.send_response(200); self.end_headers()
