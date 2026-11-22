@@ -1068,11 +1068,8 @@ def is_curator(tg_id):
     return len(res.data) > 0
 
 @bot.message_handler(commands=['guest'])
-@bot.message_handler(commands=['guest'])
 def add_guest(message):
     try:
-        bot.reply_to(message, "🔍 Отладка: команда получена, начинаю обработку...")
-        
         if not is_curator(message.from_user.id):
             return bot.reply_to(message, "⛔ Только кураторы коммуны могут запускать голосование.")
             
@@ -1098,8 +1095,6 @@ def add_guest(message):
             except ValueError:
                 return bot.reply_to(message, "❌ Укажи количество дней (число) или 'permanent'.")
                 
-        bot.reply_to(message, "🔍 Отладка: параметры верные, стучусь в базу...")
-                
         guest_id = str(uuid.uuid4())
         guest_data = {
             'id': guest_id,
@@ -1111,29 +1106,24 @@ def add_guest(message):
         
         supabase.table('commune_guests').insert(guest_data).execute()
         
-        bot.reply_to(message, "🔍 Отладка: база ответила успехом, отправляю кнопки...")
-        
         markup = types.InlineKeyboardMarkup()
-        # Исправлен формат кнопок, чтобы аргументы сохранялись правильно
         markup.add(types.InlineKeyboardButton("✅ Да", callback_data=f"vote_yes_{guest_id}"))
         markup.add(types.InlineKeyboardButton("💡 Да, аргумент", callback_data=f"vote_yes_arg_{guest_id}"))
         markup.add(types.InlineKeyboardButton("❌ Нет, аргумент", callback_data=f"vote_no_arg_{guest_id}"))
         
-        text = (f"🏠 *Голосование за впис:* {username}\n"
-                f"Куратор: [{message.from_user.first_name}](tg://user?id={message.from_user.id})\n"
+        # Используем HTML вместо Markdown
+        text = (f"🏠 <b>Голосование за впис:</b> {username}\n"
+                f"Куратор: <a href='tg://user?id={message.from_user.id}'>{message.from_user.first_name}</a>\n"
                 f"Срок: {'Бессрочно' if is_permanent else f'{days} дн.'}\n\n"
                 f"⏳ Таймер: 3 часа.")
                 
-        msg = bot.send_message(message.chat.id, text, parse_mode='Markdown', reply_markup=markup)
+        msg = bot.send_message(message.chat.id, text, parse_mode='HTML', reply_markup=markup)
         supabase.table('commune_guests').update({'message_id': msg.message_id}).eq('id', guest_id).execute()
         
         threading.Timer(10800, process_vote_result, args=[guest_id, message.chat.id, days]).start()
         
     except Exception as e:
-        import traceback
-        error_text = traceback.format_exc()
-        print(error_text) # Выведет в логи Render
-        bot.reply_to(message, f"💥 КРИТИЧЕСКАЯ ОШИБКА:\n`{str(e)}`", parse_mode='Markdown')
+        bot.reply_to(message, f"💥 ОШИБКА: {str(e)}")
         
 @bot.callback_query_handler(func=lambda call: call.data.startswith('vote_'))
 def handle_guest_vote(call):
@@ -1182,12 +1172,13 @@ def process_vote_result(guest_id, chat_id, days):
         'end_date': end_date
     }).eq('id', guest_id).execute()
     
-    text = f"✅ *Голосование завершено!*\nГость {guest['username']} принят на {'бессрочно' if guest['is_permanent'] else f'{days} дн.'}"
-    bot.send_message(chat_id, text, parse_mode='Markdown')
+    # Переводим на HTML
+    text = f"✅ <b>Голосование завершено!</b>\nГость {guest['username']} принят на {'бессрочно' if guest['is_permanent'] else f'{days} дн.'}"
+    bot.send_message(chat_id, text, parse_mode='HTML')
     if guest.get('message_id'):
-        try: bot.edit_message_text(text, chat_id, guest['message_id'], parse_mode='Markdown')
+        try: bot.edit_message_text(text, chat_id, guest['message_id'], parse_mode='HTML')
         except: pass
-
+            
 # Фоновый поток для напоминаний
 def check_guest_expirations():
     while True:
