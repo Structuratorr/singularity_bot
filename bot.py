@@ -1068,57 +1068,73 @@ def is_curator(tg_id):
     return len(res.data) > 0
 
 @bot.message_handler(commands=['guest'])
+@bot.message_handler(commands=['guest'])
 def add_guest(message):
-    if not is_curator(message.from_user.id):
-        return bot.reply_to(message, "⛔ Только кураторы коммуны могут запускать голосование.")
+    try:
+        bot.reply_to(message, "🔍 Отладка: команда получена, начинаю обработку...")
         
-    args = message.text.split()
-    if len(args) < 3:
-        return bot.reply_to(message, "Использование: `/guest @username <дней|permanent>`\nПример: `/guest @ivan 5` или `/guest @ivan permanent`", parse_mode='Markdown')
-        
-    username = args[1]
-    if not username.startswith('@'):
-        username = '@' + username
-        
-    duration = args[2]
-    is_permanent = False
-    days = 0
-    
-    if duration.lower() == 'permanent':
-        if message.from_user.id != MASTER_TG_ID:
-            return bot.reply_to(message, "⛔ Только Мастер может установить бессрочное пребывание.")
-        is_permanent = True
-    else:
-        try:
-            days = int(duration)
-        except ValueError:
-            return bot.reply_to(message, "❌ Укажи количество дней (число) или 'permanent'.")
+        if not is_curator(message.from_user.id):
+            return bot.reply_to(message, "⛔ Только кураторы коммуны могут запускать голосование.")
             
-    guest_data = {
-        'username': username,
-        'curator_id': message.from_user.id,
-        'status': 'voting',
-        'is_permanent': is_permanent
-    }
-    res = supabase.table('commune_guests').insert(guest_data).execute()
-    guest_id = res.data[0]['id']
-    
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("✅ Да", callback_data=f"v_yes_{guest_id}"))
-    markup.add(types.InlineKeyboardButton("💡 Да, аргумент на улучшение", callback_data=f"v_yes_arg_{guest_id}"))
-    markup.add(types.InlineKeyboardButton("❌ Нет, аргумент против", callback_data=f"v_no_arg_{guest_id}"))
-    
-    text = (f"🏠 *Голосование за впис:* {username}\n"
-            f"Куратор: [{message.from_user.first_name}](tg://user?id={message.from_user.id})\n"
-            f"Срок: {'Бессрочно' if is_permanent else f'{days} дн.'}\n\n"
-            f"⏳ Таймер: 3 часа.")
+        args = message.text.split()
+        if len(args) < 3:
+            return bot.reply_to(message, "Использование: `/guest @username <дней|permanent>`\nПример: `/guest @ivan 5` или `/guest @ivan permanent`", parse_mode='Markdown')
             
-    msg = bot.send_message(message.chat.id, text, parse_mode='Markdown', reply_markup=markup)
-    supabase.table('commune_guests').update({'message_id': msg.message_id}).eq('id', guest_id).execute()
-    
-    # Таймер на 3 часа (10800 секунд). Если за это время нет "Против", человек принимается.
-    threading.Timer(10800, process_vote_result, args=[guest_id, message.chat.id, days]).start()
-
+        username = args[1]
+        if not username.startswith('@'):
+            username = '@' + username
+            
+        duration = args[2]
+        is_permanent = False
+        days = 0
+        
+        if duration.lower() == 'permanent':
+            if message.from_user.id != MASTER_TG_ID:
+                return bot.reply_to(message, "⛔ Только Мастер может установить бессрочное пребывание.")
+            is_permanent = True
+        else:
+            try:
+                days = int(duration)
+            except ValueError:
+                return bot.reply_to(message, "❌ Укажи количество дней (число) или 'permanent'.")
+                
+        bot.reply_to(message, "🔍 Отладка: параметры верные, стучусь в базу...")
+                
+        guest_id = str(uuid.uuid4())
+        guest_data = {
+            'id': guest_id,
+            'username': username,
+            'curator_id': message.from_user.id,
+            'status': 'voting',
+            'is_permanent': is_permanent
+        }
+        
+        supabase.table('commune_guests').insert(guest_data).execute()
+        
+        bot.reply_to(message, "🔍 Отладка: база ответила успехом, отправляю кнопки...")
+        
+        markup = types.InlineKeyboardMarkup()
+        # Исправлен формат кнопок, чтобы аргументы сохранялись правильно
+        markup.add(types.InlineKeyboardButton("✅ Да", callback_data=f"vote_yes_{guest_id}"))
+        markup.add(types.InlineKeyboardButton("💡 Да, аргумент", callback_data=f"vote_yes_arg_{guest_id}"))
+        markup.add(types.InlineKeyboardButton("❌ Нет, аргумент", callback_data=f"vote_no_arg_{guest_id}"))
+        
+        text = (f"🏠 *Голосование за впис:* {username}\n"
+                f"Куратор: [{message.from_user.first_name}](tg://user?id={message.from_user.id})\n"
+                f"Срок: {'Бессрочно' if is_permanent else f'{days} дн.'}\n\n"
+                f"⏳ Таймер: 3 часа.")
+                
+        msg = bot.send_message(message.chat.id, text, parse_mode='Markdown', reply_markup=markup)
+        supabase.table('commune_guests').update({'message_id': msg.message_id}).eq('id', guest_id).execute()
+        
+        threading.Timer(10800, process_vote_result, args=[guest_id, message.chat.id, days]).start()
+        
+    except Exception as e:
+        import traceback
+        error_text = traceback.format_exc()
+        print(error_text) # Выведет в логи Render
+        bot.reply_to(message, f"💥 КРИТИЧЕСКАЯ ОШИБКА:\n`{str(e)}`", parse_mode='Markdown')
+        
 @bot.callback_query_handler(func=lambda call: call.data.startswith('v_'))
 def handle_guest_vote(call):
     bot.answer_callback_query(call.id)
